@@ -44,8 +44,8 @@ PALETTE (confirmed from bitmapdata.h / SPalette struct)
     B = ((word >> 10) & 0x1F) << 3
 
   .TN files (same stem alongside .i2d, or in the Thumbnails directory):
-    [0:512]  = SPalette.colors[256]  (BGR555, same data as embedded)
-    [512:768]= 256 extra bytes (alpha or key-color flags, not used here)
+    768 bytes = 256 × RGB888 (R, G, B) — raw palette AND 16×16 thumbnail.
+    Palette index 0 = transparent (alpha=0 regardless of stored colour).
 
   Palette index 0 = transparent (alpha = 0).
 
@@ -107,12 +107,17 @@ def _load_palette(path: Path,
                   payload: bytes,
                   ct_type_off: int) -> List[int]:
     """
-    Load the 256-colour BGR555 palette for `path`.
+    Load the 256-colour palette for `path` as a flat [R,G,B,…] list (768 values).
+
+    .tn files are raw 768-byte RGB888: 256 entries × 3 bytes (R, G, B).
+    This was confirmed empirically — they double as 16×16 pixel thumbnails.
+    The same 768-byte data may also be embedded in the i2d payload at the
+    self-relative OFFSET stored 8 bytes before the SChunkHeader type field.
 
     Priority:
-      1. Embedded SPalette in the i2d payload  (palette OFFSET field at ct_type_off−8)
-      2. Same-stem .TN / .tn file alongside the i2d  (first 512 bytes = BGR555)
-      3. Same-stem .tn in the Thumbnails sibling directory
+      1. Embedded palette in the i2d payload  (768-byte RGB888)
+      2. Same-stem .TN / .tn file alongside the i2d  (768-byte RGB888)
+      3. Same-stem .tn in the Thumbnails sibling directory  (768-byte RGB888)
       4. VGA fallback
     """
     cache_key = str(path)
@@ -123,17 +128,20 @@ def _load_palette(path: Path,
         _PAL_CACHE[cache_key] = pal
         return pal
 
+    def _rgb888_from_bytes(data: bytes) -> List[int]:
+        """Return flat [R,G,B,…] list from 768 raw RGB bytes."""
+        return list(data[:768])
+
     # 1 ── Embedded palette (self-relative OFFSET 8 bytes before chunk table type)
     try:
         pal_field = ct_type_off - 8
         if 0 <= pal_field and pal_field + 4 <= len(payload):
             pal_rel = struct.unpack_from('<I', payload, pal_field)[0]
             pal_abs = pal_field + pal_rel
-            if pal_abs + 512 <= len(payload):
-                raw = payload[pal_abs: pal_abs + 512]
-                # Sanity-check: not all zeros
+            if pal_abs + 768 <= len(payload):
+                raw = payload[pal_abs: pal_abs + 768]
                 if any(raw):
-                    return _store(_bgr555_to_rgb888(raw))
+                    return _store(_rgb888_from_bytes(raw))
     except Exception:
         pass
 
@@ -143,8 +151,8 @@ def _load_palette(path: Path,
         if tn.exists():
             try:
                 tn_data = tn.read_bytes()
-                if len(tn_data) >= 512 and any(tn_data[:512]):
-                    return _store(_bgr555_to_rgb888(tn_data[:512]))
+                if len(tn_data) >= 768 and any(tn_data[:768]):
+                    return _store(_rgb888_from_bytes(tn_data))
             except Exception:
                 pass
 
@@ -160,8 +168,8 @@ def _load_palette(path: Path,
                     tn = (thumbnails / path.stem.lower()).with_suffix(ext)
                 if tn.exists():
                     tn_data = tn.read_bytes()
-                    if len(tn_data) >= 512 and any(tn_data[:512]):
-                        return _store(_bgr555_to_rgb888(tn_data[:512]))
+                    if len(tn_data) >= 768 and any(tn_data[:768]):
+                        return _store(_rgb888_from_bytes(tn_data))
     except Exception:
         pass
 
@@ -441,10 +449,10 @@ def _decode_comp0(raw: bytes, width: int, height: int,
 
     pal_rel  = struct.unpack_from('<I', payload, fs + 64)[0]
     pal_abs  = (fs + 64) + pal_rel
-    if pal_abs + 512 > len(payload):
+    if pal_abs + 768 > len(payload):
         return None
 
-    pal_flat = _bgr555_to_rgb888(payload[pal_abs: pal_abs + 512])
+    pal_flat = list(payload[pal_abs: pal_abs + 768])   # raw RGB888
     rgba_pal = _make_rgba_palette(pal_flat)
 
     if flags & 0x4000:
