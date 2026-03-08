@@ -2,24 +2,57 @@
 CGSR .i2d Sprite Decoder — Revenant (1999)
 ===========================================
 
-Format summary (reverse-engineered):
-  - CGSR header: 88 bytes
-      0x48/0x4A  = width / height (pixels)
-      0x18       = state count
-  - After header: state payload containing ≥1 chunk table per state
-  - Chunk table: 32-byte pre-header, then uint32 type/width_chunks/height_chunks/table_sz,
-                 followed by (width_chunks × height_chunks) uint32 offsets
-  - Each offset is relative to the chunk table start; zero = empty/transparent chunk
-  - Each non-zero chunk block starts with 2 DLE bytes: DL (RLE escape), DH (LZ escape)
-  - Pixel stream (8-bit palette indices):
-      raw byte b   → literal pixel of index b
-      b == DL      → RLE run:  next byte = special command or (count, color) follows
-          DL + 0xC0 → skip to start of next row
-          DL + N    → RLE run: N = count, next byte = color index (paint N pixels)
-      b == DH      → LZ back-ref (2 extra bytes skipped; not yet implemented)
-  - Color index 0x00 = transparent (alpha = 0)
-  - Chunk grid: each tile is CHUNK_PX × CHUNK_PX pixels (64 px)
-  - Palette: extracted from same-directory .bmp files, else Windows VGA fallback
+Format confirmed from original Cinematix C++ source (chunkcache.cpp / bitmapdata.h):
+
+CHUNK BLOCK LAYOUT (confirmed)
+  Each offset in the chunk table points to a chunk block with layout:
+    [0:4]   4-byte cache ID  — read by game as cache key, skipped by decoder
+    [4]     DL              — RLE escape byte  (chosen to be unused pixel value)
+    [5]     DH              — LZ  escape byte  (chosen to be unused pixel value)
+    [6:]    compressed pixel stream (8-bit palette indices)
+
+COMPRESSED PIXEL STREAM (from ChunkDecompress inline ASM)
+  Raw byte b (b != DL and b != DH):
+      → literal pixel of palette index b
+
+  DL escape:
+      DL + 0x00            → EOL  (end of current row; row counter decremented)
+      DL + (N | 0x80)      → skip (N & 0x7F) transparent pixels (advance output ptr)
+      DL + N  + color      → RLE run: write N copies of color  (0 < N < 0x80)
+
+  DH escape (LZ back-reference, 4-byte token total):
+      DH + count + dist_lo + dist_hi
+      → copy `count` raw bytes from source buffer position (P_dh − dist)
+         where P_dh = absolute position of the DH byte inside `payload`
+         and   dist = uint16 little-endian (dist_lo | dist_hi<<8)
+      Back-references can span across chunk boundaries (the game loads the
+      entire imagery payload as one buffer).  Out-of-bounds → transparent.
+
+PALETTE (confirmed from bitmapdata.h / SPalette struct)
+  SPalette is embedded in the i2d at a self-relative OFFSET that lies 8 bytes
+  before the SChunkHeader (chunk table type=5 field).
+    palette_field_pos = ct_type_off − 8
+    palette_abs       = palette_field_pos + uint32_le(payload[palette_field_pos])
+
+  SPalette layout:
+    [0:512]    256 × uint16 LE  BGR555  (WORD  colors[256])
+    [512:1536] 256 × uint32 LE  ARGB    (DWORD rgbcolors[256])
+
+  BGR555 → RGB888 conversion:
+    R = (word & 0x1F) << 3
+    G = ((word >> 5) & 0x1F) << 3
+    B = ((word >> 10) & 0x1F) << 3
+
+  .TN files (same stem alongside .i2d, or in the Thumbnails directory):
+    [0:512]  = SPalette.colors[256]  (BGR555, same data as embedded)
+    [512:768]= 256 extra bytes (alpha or key-color flags, not used here)
+
+  Palette index 0 = transparent (alpha = 0).
+
+CHUNK GRID
+  Chunks are stored col-major left-to-right, top-to-bottom.
+  idx = row * n_cols + col  →  x0 = col*64, y0 = row*64
+  Empty chunk (offset == 0) = fully transparent tile.
 
 Usage:
     from decoders.i2d import decode_i2d
@@ -31,70 +64,119 @@ Usage:
 from __future__ import annotations
 import struct
 from pathlib import Path
-from typing import Optional
+from typing import Optional, List
 
-CHUNK_PX    = 64          # pixels per chunk tile
+CHUNK_PX    = 64          # pixels per chunk tile (CHUNKWIDTH = CHUNKHEIGHT = 64)
 CGSR_MAGIC  = b'CGSR'
-CHUNK_TYPE  = 5           # i2d chunk table type marker
+CHUNK_TYPE  = 5           # SChunkHeader.type value for 8-bit compressed chunks
 
 # ──────────────────────────────────────────────────────────────────────────────
 #  PALETTE
 # ──────────────────────────────────────────────────────────────────────────────
 
-_PAL_CACHE: dict[str, list] = {}   # folder → [r,g,b, r,g,b, …]  (768 values)
+_PAL_CACHE: dict[str, list] = {}   # path-key → flat [R,G,B,…] 768 values
 
 
-def _vga_palette() -> list[int]:
-    """Return the 256-colour Windows VGA palette as flat [R,G,B,…] list."""
-    # Standard 18-colour VGA palette for first 16 + extended grayscale fill
+def _bgr555_to_rgb888(data: bytes) -> List[int]:
+    """Convert 256 × uint16-LE BGR555 bytes (512 bytes) to flat [R,G,B,…] list."""
+    result: List[int] = []
+    for i in range(256):
+        word = struct.unpack_from('<H', data, i * 2)[0]
+        r = (word & 0x1F) << 3
+        g = ((word >> 5)  & 0x1F) << 3
+        b = ((word >> 10) & 0x1F) << 3
+        result.extend([r, g, b])
+    return result
+
+
+def _vga_palette() -> List[int]:
+    """Windows VGA 256-colour palette as flat [R,G,B,…] fallback."""
     vga = [
         0,0,0,        0,0,168,      0,168,0,      0,168,168,
         168,0,0,      168,0,168,    168,84,0,     168,168,168,
         84,84,84,     84,84,252,    84,252,84,    84,252,252,
         252,84,84,    252,84,252,   252,252,84,   252,252,252,
     ]
-    # Fill remaining 240 entries with a generated ramp
     for i in range(240):
         v = int(i * 255 / 239)
         vga += [v, v, v]
     return vga[:768]
 
 
-def _load_palette_from_dir(folder: Path) -> list[int]:
-    """Try to load a shared 256-colour palette from any .bmp in the same folder."""
-    key = str(folder)
-    if key in _PAL_CACHE:
-        return _PAL_CACHE[key]
+def _load_palette(path: Path,
+                  payload: bytes,
+                  ct_type_off: int) -> List[int]:
+    """
+    Load the 256-colour BGR555 palette for `path`.
+
+    Priority:
+      1. Embedded SPalette in the i2d payload  (palette OFFSET field at ct_type_off−8)
+      2. Same-stem .TN / .tn file alongside the i2d  (first 512 bytes = BGR555)
+      3. Same-stem .tn in the Thumbnails sibling directory
+      4. VGA fallback
+    """
+    cache_key = str(path)
+    if cache_key in _PAL_CACHE:
+        return _PAL_CACHE[cache_key]
+
+    def _store(pal: List[int]) -> List[int]:
+        _PAL_CACHE[cache_key] = pal
+        return pal
+
+    # 1 ── Embedded palette (self-relative OFFSET 8 bytes before chunk table type)
     try:
-        from PIL import Image
-        for bmp in folder.iterdir():
-            if bmp.suffix.lower() == '.bmp':
-                img = Image.open(bmp)
-                if img.mode == 'P':
-                    raw_pal = img.getpalette()   # up to 768 ints
-                    if raw_pal and len(raw_pal) >= 3:
-                        # Pad to 768 if shorter
-                        pal = list(raw_pal) + [0] * (768 - len(raw_pal))
-                        _PAL_CACHE[key] = pal[:768]
-                        return _PAL_CACHE[key]
-                elif img.mode in ('RGB', 'RGBA'):
-                    # Build an approximate palette from the image's colours
-                    pass
+        pal_field = ct_type_off - 8
+        if 0 <= pal_field and pal_field + 4 <= len(payload):
+            pal_rel = struct.unpack_from('<I', payload, pal_field)[0]
+            pal_abs = pal_field + pal_rel
+            if pal_abs + 512 <= len(payload):
+                raw = payload[pal_abs: pal_abs + 512]
+                # Sanity-check: not all zeros
+                if any(raw):
+                    return _store(_bgr555_to_rgb888(raw))
     except Exception:
         pass
-    pal = _vga_palette()
-    _PAL_CACHE[key] = pal
-    return pal
+
+    # 2 ── Same-directory .TN file (same stem as the .i2d)
+    for ext in ('.TN', '.tn', '.Tn'):
+        tn = path.with_suffix(ext)
+        if tn.exists():
+            try:
+                tn_data = tn.read_bytes()
+                if len(tn_data) >= 512 and any(tn_data[:512]):
+                    return _store(_bgr555_to_rgb888(tn_data[:512]))
+            except Exception:
+                pass
+
+    # 3 ── Thumbnails sibling directory (e.g. Imagery/../Thumbnails/<stem>.tn)
+    try:
+        thumbnails = path.parent.parent / 'Thumbnails'
+        if not thumbnails.exists():
+            thumbnails = path.parent.parent.parent / 'Thumbnails'
+        if thumbnails.exists():
+            for ext in ('.tn', '.TN'):
+                tn = thumbnails / (path.stem + ext)
+                if not tn.exists():
+                    tn = (thumbnails / path.stem.lower()).with_suffix(ext)
+                if tn.exists():
+                    tn_data = tn.read_bytes()
+                    if len(tn_data) >= 512 and any(tn_data[:512]):
+                        return _store(_bgr555_to_rgb888(tn_data[:512]))
+    except Exception:
+        pass
+
+    # 4 ── VGA fallback
+    return _store(_vga_palette())
 
 
-def _make_rgba_palette(pal_flat: list[int]) -> list[tuple]:
+def _make_rgba_palette(pal_flat: List[int]) -> List[tuple]:
     """Convert flat [R,G,B,…] to list of (R,G,B,A) tuples; index 0 = transparent."""
     rgba = []
     for i in range(256):
-        r = pal_flat[i * 3]     if i * 3 < len(pal_flat) else 0
+        r = pal_flat[i * 3]     if i * 3     < len(pal_flat) else 0
         g = pal_flat[i * 3 + 1] if i * 3 + 1 < len(pal_flat) else 0
         b = pal_flat[i * 3 + 2] if i * 3 + 2 < len(pal_flat) else 0
-        a = 0 if i == 0 else 255     # index 0 = transparent
+        a = 0 if i == 0 else 255
         rgba.append((r, g, b, a))
     return rgba
 
@@ -103,129 +185,159 @@ def _make_rgba_palette(pal_flat: list[int]) -> list[tuple]:
 #  CHUNK TABLE FINDER
 # ──────────────────────────────────────────────────────────────────────────────
 
-def _find_chunk_table(payload: bytes, n_cols: int, n_rows: int) -> Optional[int]:
+def _find_chunk_table(payload: bytes,
+                      n_cols_min: int,
+                      n_rows_min: int) -> Optional[tuple]:
     """
-    Scan payload for chunk table header: uint32 type=5, n_cols, n_rows.
-    Returns the offset of the type=5 field within payload, or None.
-    The pre-header (32 bytes before type) is NOT part of what we return.
+    Scan payload for SChunkHeader: uint32 type=5, followed by nc and nr.
+    Returns (ct_type_off, nc, nr) on success, or None.
 
-    Validation: at least one block offset must be non-zero AND within the
-    payload bounds relative to ct_base (= found_offset - 32).  This prevents
-    false-positive matches where [5, 1, 1] appears in unrelated data.
+    The stored nc/nr may differ from ceil(width/64) × ceil(height/64) — some
+    files store padded grid dimensions.  We accept any SChunkHeader where:
+      nc >= n_cols_min  (grid covers full sprite width)
+      nr >= n_rows_min  (grid covers full sprite height)
+      nc and nr are plausible (1–32)
+
+    Validation:
+      nc*nr > 1: at least one block offset must be non-zero and within bounds.
+      nc*nr == 1: single chunk — data starts directly at SChunkHeader+16.
     """
-    n_chunks = n_cols * n_rows
-    # We need at least: type(4) + w(4) + h(4) + sz(4) + n_chunks*4 bytes
-    min_size = 16 + n_chunks * 4
-    limit = len(payload) - min_size
-    for i in range(32, limit, 4):   # i >= 32 so ct_base = i-32 >= 0
-        if (struct.unpack_from('<I', payload, i)[0]     == CHUNK_TYPE and
-            struct.unpack_from('<I', payload, i + 4)[0] == n_cols     and
-            struct.unpack_from('<I', payload, i + 8)[0] == n_rows):
-            # Validate: at least one offset must point inside the payload
-            ct_base = i - 32
-            max_valid = len(payload) - ct_base
+    limit = len(payload) - 20   # minimum: 16-byte header + at least 4 bytes
+    for i in range(32, limit, 4):
+        if struct.unpack_from('<I', payload, i)[0] != CHUNK_TYPE:
+            continue
+        nc = struct.unpack_from('<I', payload, i + 4)[0]
+        nr = struct.unpack_from('<I', payload, i + 8)[0]
+        if not (1 <= nc <= 32 and 1 <= nr <= 32):
+            continue
+        # Accept nc/nr within ±2 of expected.  The game sometimes pads to the
+        # next even number, or a sprite declares height > n_rows*CHUNK_PX with
+        # the extra rows being transparent (bottom rows beyond the grid).
+        if (nc < max(1, n_cols_min - 2) or
+                nr < max(1, n_rows_min - 2)):
+            continue
+        n_chunks = nc * nr
+        if n_chunks == 1:
+            # Single chunk: data starts directly at SChunkHeader+16 (no offset table)
+            if i + 22 <= len(payload):   # need ≥ 6 bytes after header
+                return (i, nc, nr)
+        else:
             offsets_start = i + 16
-            valid = False
+            if offsets_start + n_chunks * 4 > len(payload):
+                continue
+            ct_base   = i - 32
+            max_valid = len(payload) - ct_base
             for k in range(n_chunks):
                 off = struct.unpack_from('<I', payload, offsets_start + k * 4)[0]
                 if 0 < off < max_valid:
-                    valid = True
-                    break
-            if valid or n_chunks == 0:
-                return i
+                    return (i, nc, nr)   # found a valid table
     return None
 
 
 # ──────────────────────────────────────────────────────────────────────────────
-#  CHUNK DECOMPRESSOR
+#  CHUNK DECOMPRESSOR  (faithful port of chunkcache.cpp ChunkDecompress ASM)
 # ──────────────────────────────────────────────────────────────────────────────
 
-def _decode_chunk(data: bytes,
+def _decode_chunk(payload: bytes,
+                  chunk_abs: int,
+                  chunk_end: int,
                   pixels: bytearray,
                   stride: int,
                   x0: int, y0: int,
-                  img_w: int, img_h: int):
+                  img_w: int, img_h: int) -> None:
     """
-    Decode one compressed chunk and write palette indices into `pixels`.
+    Decode one compressed chunk and paint palette indices into `pixels`.
 
-    `pixels` is a flat bytearray of size img_w × img_h (palette indices).
-    `stride` = img_w.
-
-    Uses a chunk-local buffer (chunk_buf) so LZ back-references can read
-    previously decoded pixels within the same chunk.
-
-    LZ back-reference format (assumed — most common for 1999-era sprites):
-        DH  offset_byte  length_byte
-        distance = offset_byte          (pixels back in linear chunk buffer)
-        length   = length_byte + 1      (1–256 pixels)
-    If the source position is out-of-bounds, index 0 (transparent) is used.
+    Parameters
+    ----------
+    payload    : full i2d payload (needed for cross-chunk LZ back-references)
+    chunk_abs  : absolute start of this chunk block in payload (incl. 4-byte ID)
+    chunk_end  : exclusive end of chunk data in payload
+    pixels     : flat bytearray, img_w × img_h palette indices
+    stride     : == img_w
+    x0, y0     : top-left pixel of this chunk on the canvas
+    img_w/h    : canvas dimensions (for bounds checking)
     """
-    if len(data) < 2:
+    if chunk_abs + 6 > len(payload):
         return
 
-    dl = data[0]   # RLE escape byte
-    dh = data[1]   # LZ back-reference escape byte
-    i  = 2
+    chunk_end = min(chunk_end, len(payload))   # never read past payload end
+    dl = payload[chunk_abs + 4]   # RLE escape byte
+    dh = payload[chunk_abs + 5]   # LZ  escape byte
+    i  = chunk_abs + 6            # absolute index into payload
 
-    # ── Chunk-local decode buffer (palette indices, 0=transparent) ────────
+    # Chunk-local 64×64 palette-index buffer (all 0 = transparent initially)
     chunk_buf = bytearray(CHUNK_PX * CHUNK_PX)
     x, y = 0, 0
 
     def _put(color: int) -> None:
         nonlocal x, y
-        if x < CHUNK_PX and y < CHUNK_PX:
+        if 0 <= x < CHUNK_PX and 0 <= y < CHUNK_PX:
             chunk_buf[y * CHUNK_PX + x] = color
         x += 1
         if x >= CHUNK_PX:
             x = 0
             y += 1
 
-    while i < len(data) and y < CHUNK_PX:
-        b = data[i]; i += 1
+    def _skip(n: int) -> None:
+        """Advance x by n transparent positions (wraps to next rows)."""
+        nonlocal x, y
+        x += n
+        while x >= CHUNK_PX:
+            x -= CHUNK_PX
+            y += 1
+
+    while i < chunk_end and y < CHUNK_PX:
+        b = payload[i]; i += 1
 
         if b == dl:
             # ── RLE escape ────────────────────────────────────────────────
-            if i >= len(data):
+            if i >= chunk_end:
                 break
-            cmd = data[i]; i += 1
+            cmd = payload[i]; i += 1
 
-            if cmd == 0xC0:
-                # Skip to start of next row
+            if cmd == 0:
+                # EOL — end of current row
                 y += 1
                 x  = 0
 
+            elif cmd & 0x80:
+                # Transparent skip: advance output by (cmd & 0x7F) pixels
+                _skip(cmd & 0x7F)
+
             else:
-                # (cmd=count, color=next byte) RLE run
-                count = cmd
-                if i >= len(data):
+                # RLE run: write cmd copies of the next byte
+                if i >= chunk_end:
                     break
-                color = data[i]; i += 1
-                for _ in range(count):
+                color = payload[i]; i += 1
+                for _ in range(cmd):
                     _put(color)
                     if y >= CHUNK_PX:
                         break
 
         elif b == dh:
             # ── LZ back-reference ─────────────────────────────────────────
-            if i + 1 >= len(data):
-                i += min(2, len(data) - i)
+            # Token: [DH][count][dist_lo][dist_hi]   (4 bytes total)
+            # Copies `count` raw bytes from payload[p_dh − dist]
+            # where p_dh = absolute offset of the DH byte.
+            if i + 2 > chunk_end:
+                i = min(i + 3, chunk_end)
                 break
-            distance = data[i];     i += 1
-            length   = data[i] + 1; i += 1   # +1 so min length = 1
+            p_dh  = i - 1                               # DH byte position in payload
+            count = payload[i];       i += 1
+            dist  = payload[i] | (payload[i + 1] << 8); i += 2
 
-            cur_pos = y * CHUNK_PX + x
-            for k in range(length):
-                src = cur_pos - distance + k
-                color = chunk_buf[src] if 0 <= src < CHUNK_PX * CHUNK_PX else 0
-                _put(color)
+            src = p_dh - dist
+            for k in range(count):
                 if y >= CHUNK_PX:
                     break
+                _put(payload[src + k] if src + k >= 0 else 0)
 
         else:
             # ── Raw pixel ─────────────────────────────────────────────────
             _put(b)
 
-    # ── Copy chunk_buf → canvas pixels ───────────────────────────────────
+    # ── Copy non-zero chunk_buf pixels → canvas ──────────────────────────
     for cy in range(CHUNK_PX):
         py = y0 + cy
         if py >= img_h:
@@ -235,8 +347,190 @@ def _decode_chunk(data: bytes,
             if px >= img_w:
                 break
             v = chunk_buf[cy * CHUNK_PX + cx]
-            if v:   # skip transparent (index 0) to preserve existing canvas
+            if v:
                 pixels[py * stride + px] = v
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+#  HDR_SIZE=84 (TBitmapData IMAGE LIST) DECODER
+# ──────────────────────────────────────────────────────────────────────────────
+
+def _decode_comp0(raw: bytes, width: int, height: int,
+                  use_alpha: bool) -> Optional["Image"]:
+    """
+    Decode a hdr_size=84 CGSR sprite (TBitmapData image-list payload).
+
+    Unlike compressed sprites (hdr_size>84) which embed TBitmapData fields
+    in the CGSR header, these files have a minimal 84-byte CGSR header and
+    store TBitmapData structures directly in the payload.
+
+    TBitmapData layout (bitmapdata.h):
+      +0…+68  metadata fields (width, height, flags, palette OFFSET, …)
+      +72     data8[1]  ← pixel data starts here (raw or with embedded SChunkHeader)
+
+    Two pixel-data formats are distinguished by TBitmapData.flags:
+      flags & 0x4000 == 0  → raw 8-bit palette-indexed pixels (datasize = w×h)
+      flags & 0x4000 == 1  → compressed: SChunkHeader type=5 at data8[0]
+                              SChunkHeader: [type=5][n_cols][n_rows][unk] (16 bytes)
+                              For n_chunks>1: offset table at data8[16..16+n_chunks*4]
+                              For n_chunks=1: chunk data starts directly at data8[16]
+                              Chunk offsets relative to ct_base = data8_start − 32.
+
+    SPalette (1536 bytes) is located via self-relative OFFSET at TBitmapData+64:
+      pal_abs = (TBitmapData_offset + 64) + uint32(TBitmapData+64)
+    """
+    from PIL import Image
+
+    hdr_size = struct.unpack_from('<H', raw, 0x10)[0]
+    payload   = raw[hdr_size:]
+
+    # ── Find TBitmapData matching (width, height) ─────────────────────────────
+    # Scan for int32 pair (width, height) at 4-byte aligned offsets.
+    # Accept palsize=1536 (8-bit indexed) or palsize=0 with datasize=w*h*2
+    # (16-bit BGR555 direct pixels, no embedded palette).
+    # Some files store TBitmapData dimensions ±4 from the CGSR header dims
+    # (due to sprite trimming); we try exact match first, then close match.
+    fs: Optional[int] = None
+    fs_mode: str = ''                  # '8bit' or '16bit'
+    fs_w: int = width
+    fs_h: int = height
+
+    def _try_find(tol: int) -> None:
+        nonlocal fs, fs_mode, fs_w, fs_h
+        for i in range(0, len(payload) - 72, 4):
+            w2 = struct.unpack_from('<i', payload, i    )[0]
+            h2 = struct.unpack_from('<i', payload, i + 4)[0]
+            if abs(w2 - width) > tol or abs(h2 - height) > tol:
+                continue
+            if w2 <= 0 or h2 <= 0:
+                continue
+            palsize  = struct.unpack_from('<I', payload, i + 60)[0]
+            datasize = struct.unpack_from('<I', payload, i + 68)[0]
+            if palsize == 1536 and 0 < datasize < len(payload):
+                fs = i; fs_mode = '8bit'; fs_w = w2; fs_h = h2; return
+            if palsize == 0 and datasize == w2 * h2 * 2 and i + 72 + datasize <= len(payload):
+                fs = i; fs_mode = '16bit'; fs_w = w2; fs_h = h2; return
+
+    _try_find(0)               # exact match first
+    if fs is None:
+        _try_find(4)           # allow up to ±4px difference in each dimension
+    if fs is None:
+        return None
+
+    flags    = struct.unpack_from('<I', payload, fs + 16)[0]
+    datasize = struct.unpack_from('<I', payload, fs + 68)[0]
+    data8_start = fs + 72
+
+    # ── 16-bit BGR555 direct pixels (no palette) ─────────────────────────────
+    if fs_mode == '16bit':
+        px_data = payload[data8_start: data8_start + datasize]
+        img     = Image.new('RGBA', (fs_w, fs_h), (0, 0, 0, 0))
+        px_load = img.load()
+        for y in range(fs_h):
+            for x in range(fs_w):
+                word = struct.unpack_from('<H', px_data, (y * fs_w + x) * 2)[0]
+                r = (word & 0x1F) << 3
+                g = ((word >> 5)  & 0x1F) << 3
+                b = ((word >> 10) & 0x1F) << 3
+                a = 0 if word == 0 else 255
+                if not use_alpha:
+                    a = 255
+                px_load[x, y] = (r, g, b, a)
+        # Crop/pad to declared CGSR dimensions
+        return img.crop((0, 0, width, height))
+
+    pal_rel  = struct.unpack_from('<I', payload, fs + 64)[0]
+    pal_abs  = (fs + 64) + pal_rel
+    if pal_abs + 512 > len(payload):
+        return None
+
+    pal_flat = _bgr555_to_rgb888(payload[pal_abs: pal_abs + 512])
+    rgba_pal = _make_rgba_palette(pal_flat)
+
+    if flags & 0x4000:
+        # ── Compressed: SChunkHeader type=5 embedded at data8[0] ─────────────
+        # SChunkHeader layout in data8:
+        #   [0:4]  type=5, [4:8] n_cols, [8:12] n_rows, [12:16] unk
+        #   [16:]  for n_chunks>1: offset table (n_chunks uint32 offsets)
+        #          for n_chunks=1: chunk data starts here directly
+
+        n_cols   = (fs_w + CHUNK_PX - 1) // CHUNK_PX
+        n_rows   = (fs_h + CHUNK_PX - 1) // CHUNK_PX
+        n_chunks = n_cols * n_rows
+
+        canvas_w = n_cols * CHUNK_PX
+        canvas_h = n_rows * CHUNK_PX
+        pixels   = bytearray(canvas_w * canvas_h)
+
+        if n_chunks == 1:
+            # Single chunk: data starts at data8[16] (no offset table entry)
+            chunk_abs = data8_start + 16
+            chunk_end = data8_start + datasize
+            if chunk_abs + 6 <= len(payload):
+                _decode_chunk(payload, chunk_abs, chunk_end,
+                              pixels, canvas_w, 0, 0, canvas_w, canvas_h)
+        else:
+            # Multi-chunk: offset table at data8[16..16+n_chunks*4]
+            # Chunk offsets are relative to ct_base = data8_start - 32
+            # (consistent with how the regular decoder's ct_base = ct_type_off - 32
+            #  maps to the 32 bytes before the type=5 field in the buffer)
+            ct_base       = data8_start - 32      # in payload coords
+            offsets_start = data8_start + 16      # in payload coords
+
+            offsets = [
+                struct.unpack_from('<I', payload, offsets_start + k * 4)[0]
+                for k in range(n_chunks)
+            ]
+
+            for idx, off in enumerate(offsets):
+                if off == 0:
+                    continue
+                col = idx % n_cols
+                row = idx // n_cols
+                abs_off = ct_base + off
+                if abs_off < 0 or abs_off + 6 >= len(payload):
+                    continue
+                chunk_end = len(payload)
+                for next_off in offsets[idx + 1:]:
+                    if 0 < next_off:
+                        cand = ct_base + next_off
+                        if cand > abs_off:
+                            chunk_end = cand
+                            break
+                _decode_chunk(payload, abs_off, chunk_end,
+                              pixels, canvas_w,
+                              col * CHUNK_PX, row * CHUNK_PX,
+                              canvas_w, canvas_h)
+
+        out     = Image.new('RGBA', (canvas_w, canvas_h), (0, 0, 0, 0))
+        px_load = out.load()
+        for py in range(canvas_h):
+            for px in range(canvas_w):
+                r, g, b, a = rgba_pal[pixels[py * canvas_w + px]]
+                if not use_alpha:
+                    a = 255
+                px_load[px, py] = (r, g, b, a)
+        return out.crop((0, 0, width, height))
+
+    else:
+        # ── Uncompressed: raw 8-bit indexed pixels ────────────────────────────
+        if data8_start + datasize > len(payload):
+            return None
+        px_data = payload[data8_start: data8_start + datasize]
+
+        img     = Image.new('RGBA', (fs_w, fs_h), (0, 0, 0, 0))
+        px_load = img.load()
+        for y in range(fs_h):
+            for x in range(fs_w):
+                idx = y * fs_w + x
+                if idx >= len(px_data):
+                    break
+                r, g, b, a = rgba_pal[px_data[idx]]
+                if not use_alpha:
+                    a = 255
+                px_load[x, y] = (r, g, b, a)
+        # Crop/pad to declared CGSR dimensions
+        return img.crop((0, 0, width, height))
 
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -249,8 +543,8 @@ def decode_i2d(path: Path, use_alpha: bool = True) -> Optional["Image"]:
 
     Parameters
     ----------
-    path       : path to the .i2d file
-    use_alpha  : if True, index 0 → transparent; else all pixels fully opaque
+    path      : path to the .i2d file
+    use_alpha : if True, index 0 → transparent; else all pixels fully opaque
     """
     try:
         from PIL import Image
@@ -265,85 +559,103 @@ def decode_i2d(path: Path, use_alpha: bool = True) -> Optional["Image"]:
     if len(raw) < 88 or raw[:4] != CGSR_MAGIC:
         return None
 
-    hdr_size = struct.unpack_from('<H', raw, 0x10)[0]
-    width    = struct.unpack_from('<H', raw, 0x48)[0]
-    height   = struct.unpack_from('<H', raw, 0x4A)[0]
-
-    if width == 0 or height == 0:
+    hdr_size  = struct.unpack_from('<H', raw, 0x10)[0]
+    width     = struct.unpack_from('<H', raw, 0x48)[0]
+    height    = struct.unpack_from('<H', raw, 0x4A)[0]
+    if width == 0 or height == 0 or hdr_size >= len(raw):
         return None
+
+    # ── hdr_size=84: try TBitmapData image-list format first ───────────────
+    # Some hdr_size=84 files store TBitmapData structs in the payload;
+    # others are standard compressed sprites with a SChunkHeader.
+    # Try _decode_comp0 first; if it returns None, fall through to the
+    # standard SChunkHeader decoder below.
+    if hdr_size == 84:
+        result = _decode_comp0(raw, width, height, use_alpha)
+        if result is not None:
+            return result
+        # Fall through: try standard compressed decoder
 
     payload = raw[hdr_size:]
 
-    n_cols   = (width  + CHUNK_PX - 1) // CHUNK_PX
-    n_rows   = (height + CHUNK_PX - 1) // CHUNK_PX
-    n_chunks = n_cols * n_rows
+    n_cols_min = (width  + CHUNK_PX - 1) // CHUNK_PX
+    n_rows_min = (height + CHUNK_PX - 1) // CHUNK_PX
 
-    # ── Locate chunk table ──────────────────────────────────────────────────
-    ct_type_off = _find_chunk_table(payload, n_cols, n_rows)
-    if ct_type_off is None:
-        return None
+    # ── Locate SChunkHeader (type=5 scan) ───────────────────────────────────
+    result_ct = _find_chunk_table(payload, n_cols_min, n_rows_min)
+    if result_ct is None:
+        # No SChunkHeader found — try TBitmapData decoder as final fallback.
+        # This handles larger-hdr_size files whose payloads use TBitmapData
+        # rather than the standard chunked-compressed format.
+        return _decode_comp0(raw, width, height, use_alpha)
 
-    # The "chunk table start" for offset calculations is 32 bytes BEFORE type field.
-    # Offsets in the block array are relative to that 32-byte-earlier position.
-    ct_base = ct_type_off - 32
+    ct_type_off, n_cols, n_rows = result_ct   # use ACTUAL stored grid dims
+    n_chunks      = n_cols * n_rows
+    ct_base       = ct_type_off - 32
+    offsets_start = ct_type_off + 16          # block[0] starts here
 
-    # table_size field at type+12; offsets start at type+16
-    offsets_start = ct_type_off + 16
-    if offsets_start + n_chunks * 4 > len(payload):
-        return None
+    # ── Load palette ─────────────────────────────────────────────────────────
+    pal_flat  = _load_palette(path, payload, ct_type_off)
+    rgba_pal  = _make_rgba_palette(pal_flat)
 
-    offsets = [
-        struct.unpack_from('<I', payload, offsets_start + k * 4)[0]
-        for k in range(n_chunks)
-    ]
-
-    # ── Build palette ────────────────────────────────────────────────────────
-    pal_flat = _load_palette_from_dir(path.parent)
-    rgba_pal = _make_rgba_palette(pal_flat)
-
-    # ── Allocate pixel buffer (8-bit palette indices) ────────────────────────
+    # ── Allocate palette-index canvas ────────────────────────────────────────
     canvas_w = n_cols * CHUNK_PX
     canvas_h = n_rows * CHUNK_PX
-    pixels   = bytearray(canvas_w * canvas_h)   # 0 = transparent
+    pixels   = bytearray(canvas_w * canvas_h)    # all 0 = transparent
 
     # ── Decode each chunk ────────────────────────────────────────────────────
-    for idx, off in enumerate(offsets):
-        if off == 0 or off > len(payload):
-            continue
-        col = idx % n_cols
-        row = idx // n_cols
-        abs_off = ct_base + off
-        if abs_off < 0 or abs_off >= len(payload):
-            continue
+    if n_chunks == 1:
+        # Single chunk: data starts directly at SChunkHeader+16 (no offset table)
+        chunk_abs = offsets_start          # = ct_type_off + 16
+        _decode_chunk(payload, chunk_abs, len(payload),
+                      pixels, canvas_w, 0, 0, canvas_w, canvas_h)
+    else:
+        if offsets_start + n_chunks * 4 > len(payload):
+            return None
 
-        # Determine chunk data size: next non-zero offset - current offset
-        chunk_end = len(payload) - ct_base
-        for next_off in offsets[idx + 1:]:
-            if 0 < next_off <= len(payload):
-                chunk_end = next_off
-                break
-        chunk_data = payload[abs_off: ct_base + chunk_end]
+        offsets = [
+            struct.unpack_from('<I', payload, offsets_start + k * 4)[0]
+            for k in range(n_chunks)
+        ]
 
-        _decode_chunk(
-            chunk_data, pixels, canvas_w,
-            col * CHUNK_PX, row * CHUNK_PX,
-            canvas_w, canvas_h
-        )
+        for idx, off in enumerate(offsets):
+            if off == 0:
+                continue                         # empty / transparent tile
+            col = idx % n_cols
+            row = idx // n_cols
+            abs_off = ct_base + off
+            if abs_off < 0 or abs_off + 6 >= len(payload):
+                continue
 
-    # ── Convert to RGBA using palette ────────────────────────────────────────
-    out = Image.new('RGBA', (canvas_w, canvas_h), (0, 0, 0, 0))
-    px_data = out.load()
+            # Determine chunk data end: next non-zero offset (exclusive)
+            chunk_end = len(payload)
+            for next_off in offsets[idx + 1:]:
+                if 0 < next_off:
+                    candidate = ct_base + next_off
+                    if candidate > abs_off:
+                        chunk_end = candidate
+                        break
+
+            _decode_chunk(
+                payload, abs_off, chunk_end,
+                pixels, canvas_w,
+                col * CHUNK_PX, row * CHUNK_PX,
+                canvas_w, canvas_h
+            )
+
+    # ── Convert palette-index canvas → RGBA image ────────────────────────────
+    out      = Image.new('RGBA', (canvas_w, canvas_h), (0, 0, 0, 0))
+    px_data  = out.load()
     for py in range(canvas_h):
         for px in range(canvas_w):
-            idx8 = pixels[py * canvas_w + px]
+            idx8     = pixels[py * canvas_w + px]
             r, g, b, a = rgba_pal[idx8]
             if not use_alpha:
                 a = 255
             px_data[px, py] = (r, g, b, a)
 
-    # Crop to actual sprite dimensions
-    out = out.crop((0, 0, width, height))
-    return out
+    # Crop to declared sprite dimensions (PIL fills out-of-bounds with transparent)
+    return out.crop((0, 0, width, height))
 
 
 def decode_i2d_info(path: Path) -> dict:
@@ -358,21 +670,23 @@ def decode_i2d_info(path: Path) -> dict:
         x_off    = struct.unpack_from('<H', raw, 0x4C)[0]
         y_off    = struct.unpack_from('<H', raw, 0x4E)[0]
         pix_fmt  = struct.unpack_from('<I', raw, 0x50)[0]
-        n_cols   = (width  + CHUNK_PX - 1) // CHUNK_PX
-        n_rows   = (height + CHUNK_PX - 1) // CHUNK_PX
-        payload  = raw[hdr_size:]
-        ct_off   = _find_chunk_table(payload, n_cols, n_rows)
+        n_cols_min = (width  + CHUNK_PX - 1) // CHUNK_PX
+        n_rows_min = (height + CHUNK_PX - 1) // CHUNK_PX
+        payload    = raw[hdr_size:]
+        ct_result  = _find_chunk_table(payload, n_cols_min, n_rows_min)
+        n_cols     = ct_result[1] if ct_result else n_cols_min
+        n_rows     = ct_result[2] if ct_result else n_rows_min
         return {
-            "width":    width,
-            "height":   height,
-            "x_offset": x_off,
-            "y_offset": y_off,
-            "pix_fmt":  hex(pix_fmt),
-            "n_chunks": n_cols * n_rows,
-            "n_cols":   n_cols,
-            "n_rows":   n_rows,
-            "ct_found": ct_off is not None,
-            "file_size": len(raw),
+            'width':    width,
+            'height':   height,
+            'x_offset': x_off,
+            'y_offset': y_off,
+            'pix_fmt':  hex(pix_fmt),
+            'n_chunks': n_cols * n_rows,
+            'n_cols':   n_cols,
+            'n_rows':   n_rows,
+            'ct_found': ct_result is not None,
+            'file_size': len(raw),
         }
     except Exception:
         return {}
