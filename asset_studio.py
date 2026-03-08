@@ -15,11 +15,12 @@ Usage:
 """
 
 import tkinter as tk
-from tkinter import ttk, messagebox
+from tkinter import ttk, messagebox, filedialog
 import struct
 import re
 import threading
 import hashlib
+import math
 from pathlib import Path
 from typing import Optional, List, Dict, Tuple
 
@@ -1410,6 +1411,139 @@ class ScriptsTab(tk.Frame):
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
+#  3D WIREFRAME VIEWER WIDGET
+# ═══════════════════════════════════════════════════════════════════════════════
+
+class ModelViewer3D(tk.Frame):
+    """
+    Orthographic wireframe viewer for i3d geometry.
+    Drag to rotate, scroll wheel to zoom.
+    Falls back to a point cloud when no face data is available.
+    """
+
+    def __init__(self, parent, **kwargs):
+        super().__init__(parent, bg=BG_DARK, **kwargs)
+        self._verts  : List[tuple] = []
+        self._faces  : List[tuple] = []
+        self._az     = 0.4    # azimuth  (radians, rotation around Y)
+        self._el     = 0.25   # elevation (radians, rotation around X)
+        self._zoom   = 1.0
+        self._drag   = None   # (x, y, az0, el0) drag start state
+        self._build()
+
+    def _build(self):
+        self._canvas = tk.Canvas(self, bg="#07070f", highlightthickness=0,
+                                 cursor="fleur")
+        self._canvas.pack(fill="both", expand=True)
+        self._info_lbl = tk.Label(self, text="Select a model to view",
+                                  bg=BG_DARK, fg=FG_MUTED,
+                                  font=("Segoe UI", 8))
+        self._info_lbl.pack(pady=(2, 4))
+
+        self._canvas.bind("<ButtonPress-1>",  self._drag_start)
+        self._canvas.bind("<B1-Motion>",       self._drag_move)
+        self._canvas.bind("<ButtonRelease-1>", lambda e: setattr(self, '_drag', None))
+        self._canvas.bind("<MouseWheel>",      self._on_wheel)
+        self._canvas.bind("<Configure>",       lambda e: self._redraw())
+
+    def load(self, verts: list, faces: list, info: str = ""):
+        self._verts  = verts
+        self._faces  = faces
+        self._az     = 0.4
+        self._el     = 0.25
+        self._zoom   = 1.0
+        self._info_lbl.config(text=info or ("No geometry" if not verts else ""))
+        self._redraw()
+
+    def _drag_start(self, e):
+        self._drag = (e.x, e.y, self._az, self._el)
+
+    def _drag_move(self, e):
+        if not self._drag:
+            return
+        x0, y0, az0, el0 = self._drag
+        self._az = az0 + (e.x - x0) * 0.008
+        self._el = max(-1.5, min(1.5, el0 - (e.y - y0) * 0.008))
+        self._redraw()
+
+    def _on_wheel(self, e):
+        self._zoom = max(0.05, min(20.0, self._zoom * (1.1 if e.delta > 0 else 0.9)))
+        self._redraw()
+
+    def _redraw(self):
+        c  = self._canvas
+        cw = c.winfo_width()  or 300
+        ch = c.winfo_height() or 240
+        c.delete("all")
+
+        if not self._verts:
+            c.create_text(cw // 2, ch // 2, text="No geometry decoded",
+                          fill=FG_MUTED, font=("Segoe UI", 10))
+            return
+
+        # ── Rotate vertices ────────────────────────────────────────────────
+        az, el = self._az, self._el
+        caz, saz = math.cos(az), math.sin(az)
+        cel, sel = math.cos(el), math.sin(el)
+
+        rot = []
+        for x, y, z in self._verts:
+            # Y-axis rotation (azimuth)
+            rx =  x * caz + z * saz
+            ry =  y
+            rz = -x * saz + z * caz
+            # X-axis rotation (elevation)
+            rot.append((rx,
+                         ry * cel - rz * sel,
+                         ry * sel + rz * cel))
+
+        # ── Scale to fit canvas ────────────────────────────────────────────
+        xs = [v[0] for v in rot]; ys = [v[1] for v in rot]
+        cx_v = (max(xs) + min(xs)) / 2
+        cy_v = (max(ys) + min(ys)) / 2
+        span = max(max(xs) - min(xs), max(ys) - min(ys), 1e-6)
+        scale = self._zoom * min(cw, ch) * 0.42 / span
+
+        def proj(v):
+            return (int(cw // 2 + (v[0] - cx_v) * scale),
+                    int(ch // 2 - (v[1] - cy_v) * scale),
+                    v[2])
+
+        pts = [proj(v) for v in rot]
+
+        # ── Draw faces or point cloud ──────────────────────────────────────
+        if self._faces:
+            # Painter's algorithm: sort faces back→front (lowest avg Z first)
+            def _fz(f):
+                a, b, fc = f
+                if a < len(pts) and b < len(pts) and fc < len(pts):
+                    return (pts[a][2] + pts[b][2] + pts[fc][2]) / 3
+                return 0
+
+            edge_col  = "#3a5a9a"
+            for face in sorted(self._faces, key=_fz):
+                a, b, fc = face
+                if a >= len(pts) or b >= len(pts) or fc >= len(pts):
+                    continue
+                ax, ay, _ = pts[a]
+                bx, by, _ = pts[b]
+                cx_, cy_, _ = pts[fc]
+                c.create_line(ax, ay, bx, by, fill=edge_col, width=1)
+                c.create_line(bx, by, cx_, cy_, fill=edge_col, width=1)
+                c.create_line(cx_, cy_, ax, ay, fill=edge_col, width=1)
+        else:
+            # Point cloud
+            dot_col = "#5080d0"
+            r = max(1, int(scale * 0.05))
+            for px, py, _ in pts:
+                c.create_oval(px - r, py - r, px + r, py + r,
+                              fill=dot_col, outline="")
+
+        c.create_text(6, 6, text="Drag to rotate  ·  Scroll to zoom",
+                      anchor="nw", fill=FG_MUTED, font=("Segoe UI", 8))
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
 #  3D MODELS TAB
 # ═══════════════════════════════════════════════════════════════════════════════
 
@@ -1462,19 +1596,40 @@ class ModelsTab(tk.Frame):
         self._tv.pack(fill="both", expand=True)
         self._tv.bind("<<TreeviewSelect>>", self._on_select)
 
-        # Detail
-        det = tk.Frame(pane, bg=BG_PANEL, padx=12, pady=12)
-        pane.add(det, minsize=280)
-        tk.Label(det, text="MODEL DETAILS", bg=BG_PANEL, fg=ACCENT,
-                 font=("Segoe UI", 11, "bold")).pack(anchor="w")
-        ttk.Separator(det).pack(fill="x", pady=6)
-        self._det_text = tk.Text(det, bg=BG_PANEL, fg=FG_TEXT,
+        # Detail panel (right): metadata top + 3D viewer bottom + OBJ export
+        det = tk.Frame(pane, bg=BG_PANEL)
+        pane.add(det, minsize=300)
+
+        # Header row
+        hdr = tk.Frame(det, bg=BG_PANEL, padx=10, pady=6)
+        hdr.pack(fill="x")
+        tk.Label(hdr, text="MODEL DETAILS", bg=BG_PANEL, fg=ACCENT,
+                 font=("Segoe UI", 11, "bold")).pack(side="left")
+        tk.Button(hdr, text="Export OBJ", bg=ACCENT3, fg="#000000",
+                  relief="flat", font=("Segoe UI", 9, "bold"), padx=8,
+                  command=self._export_obj).pack(side="right")
+
+        ttk.Separator(det).pack(fill="x")
+
+        # Vertical split: metadata text (top) + 3D viewer (bottom)
+        vpane = tk.PanedWindow(det, orient="vertical", bg=BG_DARK,
+                               sashwidth=5, sashrelief="flat")
+        vpane.pack(fill="both", expand=True)
+
+        meta_frame = tk.Frame(vpane, bg=BG_PANEL, padx=8, pady=4)
+        vpane.add(meta_frame, minsize=120)
+        self._det_text = tk.Text(meta_frame, bg=BG_PANEL, fg=FG_TEXT,
                                   font=("Consolas", 9), relief="flat",
-                                  state="disabled", wrap="word")
+                                  state="disabled", wrap="word", height=9)
         self._det_text.pack(fill="both", expand=True)
-        self._det_text.tag_configure("h",  foreground=ACCENT, font=("Segoe UI",10,"bold"))
-        self._det_text.tag_configure("kv", foreground=ACCENT2,font=("Segoe UI",9))
-        self._det_text.tag_configure("list",foreground=ACCENT3,font=("Consolas",8))
+        self._det_text.tag_configure("h",   foreground=ACCENT,  font=("Segoe UI", 10, "bold"))
+        self._det_text.tag_configure("kv",  foreground=ACCENT2, font=("Segoe UI", 9))
+        self._det_text.tag_configure("list",foreground=ACCENT3, font=("Consolas", 8))
+
+        self._viewer = ModelViewer3D(vpane)
+        vpane.add(self._viewer, minsize=200)
+
+        self._current_geom = None   # holds last decoded I3DGeometry
 
     def _load_all(self):
         self._status.set("Scanning i3d model files...")
@@ -1538,13 +1693,13 @@ class ModelsTab(tk.Frame):
         # Read animation state names
         state_names = []
         try:
-            raw   = m["path"].read_bytes()
-            count = struct.unpack_from('<I', raw, 0x18)[0]
-            def_name = raw[0x1C:0x40].split(b'\x00')[0].decode('ascii','replace')
+            raw      = m["path"].read_bytes()
+            count    = struct.unpack_from('<I', raw, 0x18)[0]
+            def_name = raw[0x1C:0x40].split(b'\x00')[0].decode('ascii', 'replace')
             for i in range(min(count, 500)):
-                off  = 0x54 + i * 76
-                name_bytes = raw[off+20:off+76].split(b'\x00')[0]
-                sname = name_bytes.decode('ascii', 'replace').strip()
+                off        = 0x54 + i * 76
+                name_bytes = raw[off + 20:off + 76].split(b'\x00')[0]
+                sname      = name_bytes.decode('ascii', 'replace').strip()
                 if sname:
                     state_names.append(sname)
         except Exception:
@@ -1559,11 +1714,11 @@ class ModelsTab(tk.Frame):
             txt.insert("end", f"  {k:<20}", "kv")
             txt.insert("end", f"{v}\n")
 
-        row("Folder",         m["folder"])
-        row("File size",      f"{m['size_kb']:,} KB  ({m['path'].stat().st_size:,} bytes)")
-        row("Anim states",    str(m["anims"]))
-        row("Est. vertices",  str(m["verts"]) if m["verts"] else "unknown")
-        row("Default state",  def_name)
+        row("Folder",        m["folder"])
+        row("File size",     f"{m['size_kb']:,} KB  ({m['path'].stat().st_size:,} bytes)")
+        row("Anim states",   str(m["anims"]))
+        row("Est. vertices", str(m["verts"]) if m["verts"] else "unknown")
+        row("Default state", def_name)
 
         if state_names:
             txt.insert("end", f"\nAnimation States ({len(state_names)}):\n", "kv")
@@ -1572,16 +1727,74 @@ class ModelsTab(tk.Frame):
 
         txt.configure(state="disabled")
 
+        # ── Async geometry decode → 3D viewer ────────────────────────────────
+        self._current_geom = None
+        self._viewer.load([], [], "Decoding geometry…")
+
+        def _decode(path=m["path"]):
+            try:
+                from decoders.i3d import decode_i3d_geometry
+                geom = decode_i3d_geometry(path)
+            except Exception:
+                geom = None
+            self._current_geom = geom
+            if geom:
+                info = (f"{len(geom.vertices):,} verts  ·  "
+                        f"{len(geom.faces):,} faces  ·  "
+                        f"stride {geom.stride} B")
+            else:
+                info = "Geometry format not detected"
+            self.after(0, lambda: self._viewer.load(
+                geom.vertices if geom else [],
+                geom.faces    if geom else [],
+                info,
+            ))
+
+        threading.Thread(target=_decode, daemon=True).start()
+
+    def _export_obj(self):
+        """Save current model geometry as Wavefront OBJ."""
+        if self._current_geom is None:
+            self._status.set("No geometry — select a model and wait for decode first")
+            return
+        geom = self._current_geom
+        default_name = geom.path.stem + ".obj"
+        out = filedialog.asksaveasfilename(
+            title="Export OBJ",
+            initialfile=default_name,
+            defaultextension=".obj",
+            filetypes=[("Wavefront OBJ", "*.obj"), ("All files", "*.*")],
+        )
+        if not out:
+            return
+        from decoders.i3d import export_obj
+        if export_obj(geom, Path(out)):
+            self._status.set(f"OBJ saved: {Path(out).name}  "
+                             f"({len(geom.vertices):,} verts, {len(geom.faces):,} faces)")
+        else:
+            self._status.set("OBJ export failed")
+
 
 # ═══════════════════════════════════════════════════════════════════════════════
 #  SPRITES BROWSER TAB
 # ═══════════════════════════════════════════════════════════════════════════════
 
-# Categories that exist in both Thumbnails/ and Imagery/
-SPRITE_CATS = [
-    "Forest", "Town", "Dungeon", "Cave", "Keep", "KeepInt",
-    "Ruin", "Labyrnth", "TownInt", "Misc",
+# Categories discovered dynamically from Thumbnails/ subdirectories.
+# Preferred order for display; any extra dirs found on disk are appended.
+_CAT_ORDER = [
+    "Chars", "Equip", "Forest", "Town", "Dungeon", "Cave",
+    "Keep", "KeepInt", "Ruin", "Labyrnth", "TownInt", "Misc",
 ]
+
+def _get_sprite_categories() -> List[str]:
+    """Scan Thumbnails/ and return sorted category names."""
+    if not THUMBNAILS.exists():
+        return _CAT_ORDER[:]
+    found = sorted(d.name for d in THUMBNAILS.iterdir() if d.is_dir())
+    # Preferred order first, then anything else alphabetically
+    ordered = [c for c in _CAT_ORDER if c in found]
+    ordered += [c for c in found if c not in _CAT_ORDER]
+    return ordered if ordered else found
 
 THUMB_SIZE  = 48   # displayed thumbnail px
 CELL_W      = 72   # grid cell width
@@ -1608,15 +1821,18 @@ class SpritesTab(tk.Frame):
 
     def __init__(self, parent, status: StatusBar):
         super().__init__(parent, bg=BG_MID)
-        self._status   = status
-        self._cat      = tk.StringVar(value=SPRITE_CATS[0])
+        self._status      = status
+        self._cats        = _get_sprite_categories()
+        self._cat         = tk.StringVar(value=self._cats[0] if self._cats else "")
         self._ph_cache: dict[str, "ImageTk.PhotoImage"] = {}
-        self._full_img = None      # current detail PIL image
-        self._full_ph  = None
+        self._full_img    = None      # current detail PIL image
+        self._full_ph     = None
         self._tn_items: list[tuple[Path, Path]] = []   # (tn_path, i2d_path)
-        self._sel_name = tk.StringVar(value="")
+        self._sel_name    = tk.StringVar(value="")
+        self._export_stop = False     # flag to cancel running export
         self._build_ui()
-        self.after(200, lambda: self._load_category(SPRITE_CATS[0]))
+        if self._cats:
+            self.after(200, lambda: self._load_category(self._cats[0]))
 
     # ── UI construction ──────────────────────────────────────────────────────
     def _build_ui(self):
@@ -1625,19 +1841,23 @@ class SpritesTab(tk.Frame):
         bar.pack(fill="x")
         tk.Label(bar, text="Category:", bg=BG_DARK, fg=FG_DIM,
                  font=("Segoe UI", 10)).pack(side="left", padx=(12, 4))
-        cat_cb = ttk.Combobox(bar, textvariable=self._cat,
-                              values=SPRITE_CATS, state="readonly", width=14)
-        cat_cb.pack(side="left", padx=(0, 10))
-        cat_cb.bind("<<ComboboxSelected>>", self._on_cat_change)
+        self._cat_cb = ttk.Combobox(bar, textvariable=self._cat,
+                                    values=self._cats, state="readonly", width=14)
+        self._cat_cb.pack(side="left", padx=(0, 10))
+        self._cat_cb.bind("<<ComboboxSelected>>", self._on_cat_change)
 
         self._count_lbl = tk.Label(bar, text="", bg=BG_DARK, fg=FG_DIM,
                                     font=("Segoe UI", 9))
         self._count_lbl.pack(side="left", padx=10)
 
-        btn_save = tk.Button(bar, text="Save PNG", bg=BG_PANEL, fg=FG_TEXT,
-                             relief="flat", padx=8,
-                             command=self._save_full_png)
-        btn_save.pack(side="right", padx=8)
+        # Right-side buttons
+        tk.Button(bar, text="Save PNG", bg=BG_PANEL, fg=FG_TEXT,
+                  relief="flat", padx=8,
+                  command=self._save_full_png).pack(side="right", padx=4)
+        self._export_btn = tk.Button(bar, text="Export All", bg=ACCENT2,
+                                     fg="white", relief="flat", padx=8,
+                                     command=self._export_all)
+        self._export_btn.pack(side="right", padx=4)
 
         # Main split: grid left | detail right
         paned = tk.PanedWindow(self, orient="horizontal", bg=BG_DARK,
@@ -1829,6 +2049,61 @@ class SpritesTab(tk.Frame):
     def _on_resize(self, _=None):
         w = self._canvas.winfo_width()
         self._canvas.itemconfig(self._win_id, width=w)
+
+    def _export_all(self):
+        """Batch-decode and save all sprites in the current category as PNGs."""
+        if not self._tn_items:
+            self._status.set("No sprites loaded — select a category first")
+            return
+        cat  = self._cat.get()
+        dest = RENDERS_DIR / cat
+        dest.mkdir(parents=True, exist_ok=True)
+
+        total = len(self._tn_items)
+        self._export_stop = False
+        self._export_btn.config(text="Stop", command=self._stop_export,
+                                bg=RED)
+
+        def _worker():
+            ok = skip = 0
+            for n, (tn_path, i2d_path) in enumerate(self._tn_items, 1):
+                if self._export_stop:
+                    break
+                out = dest / f"{tn_path.stem}.png"
+                img = None
+                # Try full i2d decode first
+                if i2d_path.exists():
+                    try:
+                        from decoders.i2d import decode_i2d
+                        img = decode_i2d(i2d_path)
+                    except Exception:
+                        pass
+                # Fallback: scale up the .tn thumbnail (48×48)
+                if img is None:
+                    img = _load_tn_image(tn_path, 64)
+                if img:
+                    try:
+                        img.save(str(out))
+                        ok += 1
+                    except Exception:
+                        skip += 1
+                else:
+                    skip += 1
+                if n % 20 == 0 or n == total:
+                    self.after(0, lambda n=n: self._status.set(
+                        f"Exporting {cat}: {n}/{total}…"))
+            self.after(0, self._on_export_done, ok, skip, dest)
+
+        threading.Thread(target=_worker, daemon=True).start()
+
+    def _stop_export(self):
+        self._export_stop = True
+
+    def _on_export_done(self, ok: int, skip: int, dest: Path):
+        self._export_btn.config(text="Export All", command=self._export_all,
+                                bg=ACCENT2)
+        self._status.set(
+            f"Export done: {ok} saved, {skip} skipped → {dest}")
 
     def _save_full_png(self):
         if self._full_img is None:

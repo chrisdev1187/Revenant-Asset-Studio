@@ -150,20 +150,37 @@ def _decode_chunk(data: bytes,
 
     `pixels` is a flat bytearray of size img_w × img_h (palette indices).
     `stride` = img_w.
+
+    Uses a chunk-local buffer (chunk_buf) so LZ back-references can read
+    previously decoded pixels within the same chunk.
+
+    LZ back-reference format (assumed — most common for 1999-era sprites):
+        DH  offset_byte  length_byte
+        distance = offset_byte          (pixels back in linear chunk buffer)
+        length   = length_byte + 1      (1–256 pixels)
+    If the source position is out-of-bounds, index 0 (transparent) is used.
     """
     if len(data) < 2:
         return
 
     dl = data[0]   # RLE escape byte
-    dh = data[1]   # LZ escape byte (skip for now)
+    dh = data[1]   # LZ back-reference escape byte
     i  = 2
 
+    # ── Chunk-local decode buffer (palette indices, 0=transparent) ────────
+    chunk_buf = bytearray(CHUNK_PX * CHUNK_PX)
     x, y = 0, 0
 
-    while i < len(data):
-        if y >= CHUNK_PX:
-            break
+    def _put(color: int) -> None:
+        nonlocal x, y
+        if x < CHUNK_PX and y < CHUNK_PX:
+            chunk_buf[y * CHUNK_PX + x] = color
+        x += 1
+        if x >= CHUNK_PX:
+            x = 0
+            y += 1
 
+    while i < len(data) and y < CHUNK_PX:
         b = data[i]; i += 1
 
         if b == dl:
@@ -184,33 +201,42 @@ def _decode_chunk(data: bytes,
                     break
                 color = data[i]; i += 1
                 for _ in range(count):
-                    if x < CHUNK_PX and y < CHUNK_PX:
-                        px = x0 + x
-                        py = y0 + y
-                        if 0 <= px < img_w and 0 <= py < img_h:
-                            pixels[py * stride + px] = color
-                    x += 1
-                    if x >= CHUNK_PX:
-                        x  = 0
-                        y += 1
-                        if y >= CHUNK_PX:
-                            break
+                    _put(color)
+                    if y >= CHUNK_PX:
+                        break
 
         elif b == dh:
-            # ── LZ back-reference (skip — not yet implemented) ────────────
-            i += 2
+            # ── LZ back-reference ─────────────────────────────────────────
+            if i + 1 >= len(data):
+                i += min(2, len(data) - i)
+                break
+            distance = data[i];     i += 1
+            length   = data[i] + 1; i += 1   # +1 so min length = 1
+
+            cur_pos = y * CHUNK_PX + x
+            for k in range(length):
+                src = cur_pos - distance + k
+                color = chunk_buf[src] if 0 <= src < CHUNK_PX * CHUNK_PX else 0
+                _put(color)
+                if y >= CHUNK_PX:
+                    break
 
         else:
             # ── Raw pixel ─────────────────────────────────────────────────
-            if x < CHUNK_PX and y < CHUNK_PX:
-                px = x0 + x
-                py = y0 + y
-                if 0 <= px < img_w and 0 <= py < img_h:
-                    pixels[py * stride + px] = b
-            x += 1
-            if x >= CHUNK_PX:
-                x  = 0
-                y += 1
+            _put(b)
+
+    # ── Copy chunk_buf → canvas pixels ───────────────────────────────────
+    for cy in range(CHUNK_PX):
+        py = y0 + cy
+        if py >= img_h:
+            break
+        for cx in range(CHUNK_PX):
+            px = x0 + cx
+            if px >= img_w:
+                break
+            v = chunk_buf[cy * CHUNK_PX + cx]
+            if v:   # skip transparent (index 0) to preserve existing canvas
+                pixels[py * stride + px] = v
 
 
 # ──────────────────────────────────────────────────────────────────────────────
