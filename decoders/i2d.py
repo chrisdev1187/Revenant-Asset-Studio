@@ -35,16 +35,18 @@ PALETTE (confirmed from bitmapdata.h / SPalette struct)
     palette_abs       = palette_field_pos + uint32_le(payload[palette_field_pos])
 
   SPalette layout:
-    [0:512]    256 × uint16 LE  BGR555  (WORD  colors[256])
-    [512:1536] 256 × uint32 LE  ARGB    (DWORD rgbcolors[256])
+    [0:512]    256 × uint16 LE  X1R5G5B5  (WORD  colors[256])
+    [512:1536] 256 × uint32 LE  ARGB      (DWORD rgbcolors[256])
 
-  BGR555 → RGB888 conversion:
-    R = (word & 0x1F) << 3
-    G = ((word >> 5) & 0x1F) << 3
-    B = ((word >> 10) & 0x1F) << 3
+  X1R5G5B5 → RGB888 conversion (DirectDraw RGB555 / X1R5G5B5):
+    R = ((word >> 10) & 0x1F) << 3   ← R in HIGH bits (14-10)
+    G = ((word >>  5) & 0x1F) << 3   ← G in MID  bits  (9-5)
+    B = (  word       & 0x1F) << 3   ← B in LOW  bits  (4-0)
 
   .TN files (same stem alongside .i2d, or in the Thumbnails directory):
-    768 bytes = 256 × RGB888 (R, G, B) — raw palette AND 16×16 thumbnail.
+    768 bytes total; first 512 bytes = SPalette.colors[] (X1R5G5B5 palette),
+    bytes 512-767 = ARGB data or thumbnail indices (not used for palette).
+    Only the first 512 bytes are read for palette decoding.
     Palette index 0 = transparent (alpha=0 regardless of stored colour).
 
   Palette index 0 = transparent (alpha = 0).
@@ -78,13 +80,20 @@ _PAL_CACHE: dict[str, list] = {}   # path-key → flat [R,G,B,…] 768 values
 
 
 def _bgr555_to_rgb888(data: bytes) -> List[int]:
-    """Convert 256 × uint16-LE BGR555 bytes (512 bytes) to flat [R,G,B,…] list."""
+    """Convert 256 × uint16-LE X1R5G5B5 words (512 bytes) to flat [R,G,B,…] list.
+
+    DirectDraw X1R5G5B5 / RGB555 bit layout (confirmed empirically):
+      bits 14-10 = R  (5 bits, high)
+      bits  9-5  = G  (5 bits, mid)
+      bits  4-0  = B  (5 bits, low)
+    Each component is scaled to 8-bit by left-shifting 3 (e.g. 0x1F → 0xF8).
+    """
     result: List[int] = []
     for i in range(256):
         word = struct.unpack_from('<H', data, i * 2)[0]
-        r = (word & 0x1F) << 3
-        g = ((word >> 5)  & 0x1F) << 3
-        b = ((word >> 10) & 0x1F) << 3
+        r = ((word >> 10) & 0x1F) << 3   # R in HIGH bits (14-10)
+        g = ((word >>  5) & 0x1F) << 3   # G in MID  bits  (9-5)
+        b = ( word        & 0x1F) << 3   # B in LOW  bits  (4-0)
         result.extend([r, g, b])
     return result
 
@@ -109,15 +118,19 @@ def _load_palette(path: Path,
     """
     Load the 256-colour palette for `path` as a flat [R,G,B,…] list (768 values).
 
-    .tn files are raw 768-byte RGB888: 256 entries × 3 bytes (R, G, B).
-    This was confirmed empirically — they double as 16×16 pixel thumbnails.
-    The same 768-byte data may also be embedded in the i2d payload at the
-    self-relative OFFSET stored 8 bytes before the SChunkHeader type field.
+    Palette format (confirmed by SPalette struct in bitmapdata.h):
+      SPalette.colors[256]  — 512 bytes of 256 × uint16 LE X1R5G5B5 words
+        bits 14-10 = R,  bits 9-5 = G,  bits 4-0 = B
+      Embedded via self-relative OFFSET at (ct_type_off − 8) in the payload.
+
+    .TN files alongside the .i2d also begin with the same 512-byte X1R5G5B5
+    palette block (bytes 512-767 are something else — thumbnail or ARGB partial).
+    We only read the first 512 bytes of a .tn file for palette use.
 
     Priority:
-      1. Embedded palette in the i2d payload  (768-byte RGB888)
-      2. Same-stem .TN / .tn file alongside the i2d  (768-byte RGB888)
-      3. Same-stem .tn in the Thumbnails sibling directory  (768-byte RGB888)
+      1. Embedded palette in the i2d payload  (512-byte X1R5G5B5)
+      2. Same-stem .TN / .tn file alongside the i2d  (first 512 bytes)
+      3. Same-stem .tn in the Thumbnails sibling directory  (first 512 bytes)
       4. VGA fallback
     """
     cache_key = str(path)
@@ -128,20 +141,16 @@ def _load_palette(path: Path,
         _PAL_CACHE[cache_key] = pal
         return pal
 
-    def _rgb888_from_bytes(data: bytes) -> List[int]:
-        """Return flat [R,G,B,…] list from 768 raw RGB bytes."""
-        return list(data[:768])
-
     # 1 ── Embedded palette (self-relative OFFSET 8 bytes before chunk table type)
     try:
         pal_field = ct_type_off - 8
         if 0 <= pal_field and pal_field + 4 <= len(payload):
             pal_rel = struct.unpack_from('<I', payload, pal_field)[0]
             pal_abs = pal_field + pal_rel
-            if pal_abs + 768 <= len(payload):
-                raw = payload[pal_abs: pal_abs + 768]
+            if pal_abs + 512 <= len(payload):
+                raw = payload[pal_abs: pal_abs + 512]
                 if any(raw):
-                    return _store(_rgb888_from_bytes(raw))
+                    return _store(_bgr555_to_rgb888(raw))
     except Exception:
         pass
 
@@ -151,8 +160,8 @@ def _load_palette(path: Path,
         if tn.exists():
             try:
                 tn_data = tn.read_bytes()
-                if len(tn_data) >= 768 and any(tn_data[:768]):
-                    return _store(_rgb888_from_bytes(tn_data))
+                if len(tn_data) >= 512 and any(tn_data[:512]):
+                    return _store(_bgr555_to_rgb888(tn_data[:512]))
             except Exception:
                 pass
 
@@ -168,8 +177,8 @@ def _load_palette(path: Path,
                     tn = (thumbnails / path.stem.lower()).with_suffix(ext)
                 if tn.exists():
                     tn_data = tn.read_bytes()
-                    if len(tn_data) >= 768 and any(tn_data[:768]):
-                        return _store(_rgb888_from_bytes(tn_data))
+                    if len(tn_data) >= 512 and any(tn_data[:512]):
+                        return _store(_bgr555_to_rgb888(tn_data[:512]))
     except Exception:
         pass
 
@@ -429,7 +438,7 @@ def _decode_comp0(raw: bytes, width: int, height: int,
     datasize = struct.unpack_from('<I', payload, fs + 68)[0]
     data8_start = fs + 72
 
-    # ── 16-bit BGR555 direct pixels (no palette) ─────────────────────────────
+    # ── 16-bit X1R5G5B5 direct pixels (no palette) ───────────────────────────
     if fs_mode == '16bit':
         px_data = payload[data8_start: data8_start + datasize]
         img     = Image.new('RGBA', (fs_w, fs_h), (0, 0, 0, 0))
@@ -437,9 +446,9 @@ def _decode_comp0(raw: bytes, width: int, height: int,
         for y in range(fs_h):
             for x in range(fs_w):
                 word = struct.unpack_from('<H', px_data, (y * fs_w + x) * 2)[0]
-                r = (word & 0x1F) << 3
-                g = ((word >> 5)  & 0x1F) << 3
-                b = ((word >> 10) & 0x1F) << 3
+                r = ((word >> 10) & 0x1F) << 3   # R in HIGH bits (14-10)
+                g = ((word >>  5) & 0x1F) << 3   # G in MID  bits  (9-5)
+                b = ( word        & 0x1F) << 3   # B in LOW  bits  (4-0)
                 a = 0 if word == 0 else 255
                 if not use_alpha:
                     a = 255
@@ -449,10 +458,10 @@ def _decode_comp0(raw: bytes, width: int, height: int,
 
     pal_rel  = struct.unpack_from('<I', payload, fs + 64)[0]
     pal_abs  = (fs + 64) + pal_rel
-    if pal_abs + 768 > len(payload):
+    if pal_abs + 512 > len(payload):
         return None
 
-    pal_flat = list(payload[pal_abs: pal_abs + 768])   # raw RGB888
+    pal_flat = _bgr555_to_rgb888(payload[pal_abs: pal_abs + 512])  # X1R5G5B5
     rgba_pal = _make_rgba_palette(pal_flat)
 
     if flags & 0x4000:
