@@ -276,37 +276,67 @@ def get_available_zones() -> List[int]:
     for f in automap_dir.iterdir():
         if f.suffix.lower() == '.bmp':
             parts = f.stem.split('_')
-            if parts and parts[0].isdigit():
-                zones.add(int(parts[0]))
+            if parts:
+                try:
+                    zones.add(int(parts[0]))
+                except ValueError:
+                    pass
     return sorted(zones)
 
 
 def stitch_zone_map(zone: int, tile_size: int = 64) -> Optional["Image.Image"]:
-    """Stitch all automap tiles for a zone into a single PIL Image."""
+    """Stitch all automap tiles for a zone into a single PIL Image.
+
+    Tile filenames use the format:  Zone_Y_X.bmp
+    Y is a *signed* integer (negative values are common, e.g. 0_-10_25.bmp).
+    X may also be non-zero-based (e.g. 15-39 for zone 0).
+    We normalise both axes so the grid starts at (0, 0).
+    """
     if not HAS_PIL:
         return None
     tiles = get_automap_tiles(zone)
     if not tiles:
         return None
 
-    # Parse row/col from filename: zone_row_col.bmp
+    # Parse (Y, X) from filename: zone_Y_X.bmp  — Y/X are signed integers
     coords = []
     for t in tiles:
         parts = t.stem.split('_')
-        if len(parts) == 3 and parts[1].isdigit() and parts[2].isdigit():
-            coords.append((int(parts[1]), int(parts[2]), t))
+        # stem may look like "0_-10_25" → split gives ['0', '-10', '25']
+        # but "0_-10" splits into ['0', '', '10'] with a leading '-' issue on
+        # some Python versions, so we re-join after the zone prefix to be safe.
+        if len(parts) < 3:
+            continue
+        try:
+            # parts[0] = zone, parts[1] = Y (may be negative), parts[2] = X
+            y_val = int(parts[1])
+            x_val = int(parts[2])
+            coords.append((y_val, x_val, t))
+        except ValueError:
+            pass
 
     if not coords:
         return None
 
-    max_row = max(r for r, c, _ in coords)
-    max_col = max(c for r, c, _ in coords)
-    canvas = Image.new('RGB', ((max_col + 1) * tile_size, (max_row + 1) * tile_size), (20, 20, 30))
+    min_y = min(y for y, x, _ in coords)
+    min_x = min(x for y, x, _ in coords)
+    max_y = max(y for y, x, _ in coords)
+    max_x = max(x for y, x, _ in coords)
 
-    for row, col, path in coords:
+    n_cols = max_x - min_x + 1
+    n_rows = max_y - min_y + 1
+
+    canvas_w = n_cols * tile_size
+    canvas_h = n_rows * tile_size
+    canvas = Image.new('RGB', (canvas_w, canvas_h), (20, 20, 30))
+
+    for y_val, x_val, path in coords:
+        norm_col = x_val - min_x
+        # Y axis: most-negative Y (northernmost) maps to top row (row 0)
+        norm_row = y_val - min_y
         try:
             tile = Image.open(path).convert('RGB').resize((tile_size, tile_size), Image.NEAREST)
-            canvas.paste(tile, (col * tile_size, row * tile_size))
+            canvas.paste(tile, (norm_col * tile_size, norm_row * tile_size))
         except Exception:
             pass
 
@@ -1544,6 +1574,277 @@ class ModelsTab(tk.Frame):
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
+#  SPRITES BROWSER TAB
+# ═══════════════════════════════════════════════════════════════════════════════
+
+# Categories that exist in both Thumbnails/ and Imagery/
+SPRITE_CATS = [
+    "Forest", "Town", "Dungeon", "Cave", "Keep", "KeepInt",
+    "Ruin", "Labyrnth", "TownInt", "Misc",
+]
+
+THUMB_SIZE  = 48   # displayed thumbnail px
+CELL_W      = 72   # grid cell width
+CELL_H      = 66   # grid cell height (image + name)
+GRID_COLS   = 8    # thumbnails per row
+
+
+def _load_tn_image(tn_path: Path, size: int = THUMB_SIZE) -> Optional["Image.Image"]:
+    """Load a 16×16 raw RGB888 .tn file and scale to `size`×`size`."""
+    if not HAS_PIL:
+        return None
+    try:
+        raw = tn_path.read_bytes()
+        if len(raw) < 768:
+            return None
+        img = Image.frombytes('RGB', (16, 16), raw[:768])
+        return img.resize((size, size), Image.NEAREST)
+    except Exception:
+        return None
+
+
+class SpritesTab(tk.Frame):
+    """Browse all sprite thumbnails by category; click to decode full i2d."""
+
+    def __init__(self, parent, status: StatusBar):
+        super().__init__(parent, bg=BG_MID)
+        self._status   = status
+        self._cat      = tk.StringVar(value=SPRITE_CATS[0])
+        self._ph_cache: dict[str, "ImageTk.PhotoImage"] = {}
+        self._full_img = None      # current detail PIL image
+        self._full_ph  = None
+        self._tn_items: list[tuple[Path, Path]] = []   # (tn_path, i2d_path)
+        self._sel_name = tk.StringVar(value="")
+        self._build_ui()
+        self.after(200, lambda: self._load_category(SPRITE_CATS[0]))
+
+    # ── UI construction ──────────────────────────────────────────────────────
+    def _build_ui(self):
+        # Top toolbar
+        bar = tk.Frame(self, bg=BG_DARK, pady=4)
+        bar.pack(fill="x")
+        tk.Label(bar, text="Category:", bg=BG_DARK, fg=FG_DIM,
+                 font=("Segoe UI", 10)).pack(side="left", padx=(12, 4))
+        cat_cb = ttk.Combobox(bar, textvariable=self._cat,
+                              values=SPRITE_CATS, state="readonly", width=14)
+        cat_cb.pack(side="left", padx=(0, 10))
+        cat_cb.bind("<<ComboboxSelected>>", self._on_cat_change)
+
+        self._count_lbl = tk.Label(bar, text="", bg=BG_DARK, fg=FG_DIM,
+                                    font=("Segoe UI", 9))
+        self._count_lbl.pack(side="left", padx=10)
+
+        btn_save = tk.Button(bar, text="Save PNG", bg=BG_PANEL, fg=FG_TEXT,
+                             relief="flat", padx=8,
+                             command=self._save_full_png)
+        btn_save.pack(side="right", padx=8)
+
+        # Main split: grid left | detail right
+        paned = tk.PanedWindow(self, orient="horizontal", bg=BG_DARK,
+                               sashwidth=4, sashrelief="flat")
+        paned.pack(fill="both", expand=True)
+
+        # ── Left: scrollable thumbnail grid ──────────────────────────────────
+        left = tk.Frame(paned, bg=BG_MID)
+        paned.add(left, minsize=200)
+
+        self._canvas = tk.Canvas(left, bg=BG_MID, highlightthickness=0)
+        vsb = ttk.Scrollbar(left, orient="vertical", command=self._canvas.yview)
+        self._canvas.configure(yscrollcommand=vsb.set)
+        vsb.pack(side="right", fill="y")
+        self._canvas.pack(side="left", fill="both", expand=True)
+        self._canvas.bind("<Configure>", self._on_resize)
+        self._canvas.bind("<MouseWheel>", lambda e: self._canvas.yview_scroll(
+            -1 if e.delta > 0 else 1, "units"))
+
+        # inner frame inside canvas for the grid
+        self._inner = tk.Frame(self._canvas, bg=BG_MID)
+        self._win_id = self._canvas.create_window((0, 0), window=self._inner,
+                                                   anchor="nw")
+        self._inner.bind("<Configure>",
+                         lambda e: self._canvas.configure(
+                             scrollregion=self._canvas.bbox("all")))
+
+        # ── Right: detail panel ───────────────────────────────────────────────
+        right = tk.Frame(paned, bg=BG_PANEL, width=340)
+        paned.add(right, minsize=240)
+
+        tk.Label(right, textvariable=self._sel_name, bg=BG_PANEL, fg=ACCENT2,
+                 font=("Segoe UI", 11, "bold"), anchor="center").pack(
+                     fill="x", pady=(10, 4))
+
+        self._dim_lbl = tk.Label(right, text="", bg=BG_PANEL, fg=FG_DIM,
+                                  font=("Segoe UI", 9))
+        self._dim_lbl.pack(fill="x", padx=10)
+
+        # Image canvas for the decoded sprite
+        self._detail_canvas = tk.Canvas(right, bg=BG_MID, highlightthickness=1,
+                                         highlightbackground=BG_DARK)
+        self._detail_canvas.pack(fill="both", expand=True, padx=10, pady=10)
+
+        self._decode_lbl = tk.Label(right, text="", bg=BG_PANEL, fg=FG_DIM,
+                                     font=("Segoe UI", 8))
+        self._decode_lbl.pack(pady=(0, 6))
+
+    # ── Category loading ─────────────────────────────────────────────────────
+    def _on_cat_change(self, _=None):
+        self._load_category(self._cat.get())
+
+    def _load_category(self, cat: str):
+        tn_dir  = THUMBNAILS / cat
+        img_dir = IMAGERY_ASSETS / cat
+        if not tn_dir.exists():
+            self._status.set(f"No thumbnails for {cat}")
+            return
+
+        self._status.set(f"Loading {cat} thumbnails…")
+        self._ph_cache.clear()
+
+        # Collect (tn_path, i2d_path) pairs
+        tn_files = sorted(tn_dir.glob("*.tn")) + sorted(tn_dir.glob("*.TN"))
+        pairs: list[tuple[Path, Path]] = []
+        for tn in tn_files:
+            # Find matching i2d (case-insensitive)
+            i2d = Path("")
+            if img_dir.exists():
+                stem = tn.stem
+                for ext in (".i2d", ".I2D"):
+                    cand = img_dir / (stem + ext)
+                    if cand.exists():
+                        i2d = cand
+                        break
+                if not i2d.exists():
+                    # Case-insensitive search
+                    for f in img_dir.iterdir():
+                        if f.stem.lower() == stem.lower() and f.suffix.lower() == ".i2d":
+                            i2d = f
+                            break
+            pairs.append((tn, i2d))
+        self._tn_items = pairs
+
+        self._count_lbl.config(text=f"{len(pairs)} sprites")
+        self._rebuild_grid()
+        self._status.set(f"{cat}: {len(pairs)} sprites")
+
+    def _rebuild_grid(self):
+        # Clear old widgets
+        for w in self._inner.winfo_children():
+            w.destroy()
+        self._ph_cache.clear()
+
+        ncols = max(1, GRID_COLS)
+        for idx, (tn_path, i2d_path) in enumerate(self._tn_items):
+            row = idx // ncols
+            col = idx % ncols
+            cell = tk.Frame(self._inner, bg=BG_MID,
+                            width=CELL_W, height=CELL_H)
+            cell.grid_propagate(False)
+            cell.grid(row=row, column=col, padx=2, pady=2)
+
+            # Thumbnail image
+            img = _load_tn_image(tn_path, THUMB_SIZE)
+            if img and HAS_PIL:
+                ph = ImageTk.PhotoImage(img)
+                self._ph_cache[str(tn_path)] = ph
+                lbl = tk.Label(cell, image=ph, bg=BG_MID, cursor="hand2")
+                lbl._photo = ph
+                lbl.pack(pady=(3, 0))
+            else:
+                ph = None
+                lbl = tk.Label(cell, text="?", bg=BG_MID, fg=FG_DIM,
+                               width=4, height=3)
+                lbl.pack(pady=(3, 0))
+
+            # Name label (truncated)
+            name = tn_path.stem[:11]
+            tk.Label(cell, text=name, bg=BG_MID, fg=FG_TEXT,
+                     font=("Segoe UI", 7), anchor="center").pack()
+
+            # Bind click
+            for w in (cell, lbl):
+                w.bind("<Button-1>",
+                       lambda e, tp=tn_path, ip=i2d_path: self._on_click(tp, ip))
+
+        # Update scroll region
+        self._inner.update_idletasks()
+        self._canvas.configure(scrollregion=self._canvas.bbox("all"))
+
+    # ── Sprite click → decode ────────────────────────────────────────────────
+    def _on_click(self, tn_path: Path, i2d_path: Path):
+        name = tn_path.stem
+        self._sel_name.set(name)
+        self._decode_lbl.config(text="Decoding…")
+        self._status.set(f"Decoding {name}…")
+
+        def _worker():
+            # Try full i2d decode first
+            img = None
+            if i2d_path.exists():
+                try:
+                    from decoders.i2d import decode_i2d
+                    img = decode_i2d(i2d_path)
+                except Exception:
+                    pass
+            # Fallback: scale up the .tn thumbnail
+            if img is None:
+                img = _load_tn_image(tn_path, 128)
+                label_txt = f"Preview: {tn_path.name}  (no i2d decode)"
+            else:
+                label_txt = f"{img.width}×{img.height}px  |  {i2d_path.name}"
+            self.after(0, lambda: self._show_detail(img, label_txt))
+
+        import threading
+        threading.Thread(target=_worker, daemon=True).start()
+
+    def _show_detail(self, img, label_txt: str):
+        if img is None:
+            self._decode_lbl.config(text="Decode failed")
+            return
+        self._full_img = img
+        # Fit into the detail canvas
+        cw = self._detail_canvas.winfo_width()  or 300
+        ch = self._detail_canvas.winfo_height() or 300
+        scale = min(cw / max(img.width, 1), ch / max(img.height, 1), 4.0)
+        dw = max(1, int(img.width  * scale))
+        dh = max(1, int(img.height * scale))
+
+        disp = img.resize((dw, dh), Image.NEAREST)
+        # Composite onto dark background
+        bg = Image.new("RGBA", (dw, dh), (20, 20, 30, 255))
+        if disp.mode == "RGBA":
+            bg.paste(disp, (0, 0), disp)
+        else:
+            bg.paste(disp.convert("RGBA"), (0, 0))
+        ph = ImageTk.PhotoImage(bg)
+        self._full_ph = ph
+
+        self._detail_canvas.delete("all")
+        self._detail_canvas.create_image(cw // 2, ch // 2,
+                                          anchor="center", image=ph)
+        self._detail_canvas.configure(scrollregion=self._detail_canvas.bbox("all"))
+        self._dim_lbl.config(text=f"{img.width}×{img.height} px")
+        self._decode_lbl.config(text=label_txt)
+        self._status.set(label_txt)
+
+    def _on_resize(self, _=None):
+        w = self._canvas.winfo_width()
+        self._canvas.itemconfig(self._win_id, width=w)
+
+    def _save_full_png(self):
+        if self._full_img is None:
+            self._status.set("Nothing to save — click a sprite first")
+            return
+        RENDERS_DIR.mkdir(exist_ok=True)
+        name = self._sel_name.get() or "sprite"
+        out = RENDERS_DIR / f"{name}.png"
+        try:
+            self._full_img.save(str(out))
+            self._status.set(f"Saved: {out.name}")
+        except Exception as e:
+            self._status.set(f"Save failed: {e}")
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
 #  MAIN APPLICATION
 # ═══════════════════════════════════════════════════════════════════════════════
 
@@ -1613,6 +1914,7 @@ class AssetStudio(tk.Tk):
         self._map_tab  = WorldMapTab(self._nb, self._status)
         self._char_tab = CharacterGalleryTab(self._nb, self._status)
         self._equip_tab= EquipmentTab(self._nb, self._status)
+        self._spr_tab  = SpritesTab(self._nb, self._status)
         self._spell_tab= SpellsTab(self._nb, self._status)
         self._scr_tab  = ScriptsTab(self._nb, self._status)
         self._mod_tab  = ModelsTab(self._nb, self._status)
@@ -1620,6 +1922,7 @@ class AssetStudio(tk.Tk):
         self._nb.add(self._map_tab,   text="  World Map  ")
         self._nb.add(self._char_tab,  text="  Characters  ")
         self._nb.add(self._equip_tab, text="  Equipment  ")
+        self._nb.add(self._spr_tab,   text="  Sprites  ")
         self._nb.add(self._spell_tab, text="  Spells  ")
         self._nb.add(self._scr_tab,   text="  Scripts  ")
         self._nb.add(self._mod_tab,   text="  3D Models  ")
