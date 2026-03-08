@@ -169,12 +169,15 @@ Priority order for palette resolution:
 1. **Embedded SPalette** at `payload[pal_field + pal_rel]` — self-relative OFFSET.
    In standard SChunkHeader format: `pal_field = ct_type_off - 8`.
    In TBitmapData format: `pal_field = (TBitmapData_offset + 64)`.
-   SPalette is 1536 bytes: `[0:512]` = 256 × uint16 LE BGR555, `[512:1536]` = 256 × uint32 ARGB32.
-2. **Same-directory `.TN` / `.tn` file** alongside the `.i2d` (first 512 bytes = BGR555)
-3. **Thumbnails sibling directory** `.tn` file matching the `.i2d` stem
+   SPalette is 1536 bytes: `[0:512]` = 256 × uint16 LE **X1R5G5B5**, `[512:1536]` = 256 × uint32 ARGB32.
+   Only the first 512 bytes are used for decoding.
+2. **Same-directory `.TN` / `.tn` file** alongside the `.i2d` (first 512 bytes = X1R5G5B5)
+3. **Thumbnails sibling directory** `.tn` file matching the `.i2d` stem (first 512 bytes)
 4. **Windows VGA 16-colour + grayscale ramp** (last resort)
 
-**BGR555 → RGB888:** `R = (word & 0x1F)<<3`, `G = ((word>>5) & 0x1F)<<3`, `B = ((word>>10) & 0x1F)<<3`
+**X1R5G5B5 → RGB888 (DirectDraw RGB555):**
+`R = ((word>>10) & 0x1F)<<3`,  `G = ((word>>5) & 0x1F)<<3`,  `B = (word & 0x1F)<<3`
+(R in HIGH bits 14-10, G in MID bits 9-5, B in LOW bits 4-0. Confirmed empirically via comparison renders.)
 **Palette index 0 = transparent (alpha=0) in all formats.**
 
 #### Chunk Grid Layout
@@ -367,10 +370,14 @@ out = out.crop((0, 0, width, height))
 
 ### `.tn` File Format
 
-- **Size:** Exactly 768 bytes (256 × RGB)
-- **Format:** Raw binary, no header. Entry `i` = bytes `[i*3, i*3+1, i*3+2]` = R, G, B.
-- **Dual purpose:** Used as both the 256-colour palette for `.i2d` decoding AND as a
-  16×16 thumbnail preview (first 768 bytes interpreted as `Image.frombytes('RGB', (16,16), data)`).
+- **Size:** Exactly 768 bytes
+- **Format:** Raw binary, no header.
+  - **Bytes 0–511:** 256 × uint16 LE **X1R5G5B5** — the 256-colour sprite palette
+    (`SPalette.colors[]`). R in bits 14-10, G in bits 9-5, B in bits 4-0.
+  - **Bytes 512–767:** ARGB/thumbnail index data (not used for palette decoding).
+- **Palette use:** Only the first **512 bytes** are read for `.i2d` decoding (decoded as X1R5G5B5).
+- **Thumbnail use:** The full 768 bytes are re-interpreted as `Image.frombytes('RGB', (16,16), data)`
+  for the 16×16 thumbnail grid (this is a visual approximation — the bytes aren't true RGB888).
 - **Location:** `_extracted/imagery/Thumbnails/<Category>/` matching `.i2d` stem name.
 - **Windows gotcha:** On Windows, `glob("*.tn")` and `glob("*.TN")` both match the
   same file (case-insensitive FS), causing duplicates. Must use `iterdir()` with a
@@ -493,9 +500,10 @@ noise. The actual format is 8-bit palette indices. The palette is stored externa
 in `.tn` files, not embedded in the `.i2d` file itself.
 
 ### Discovery 5: .tn Files are Palettes AND Thumbnails
-A `.tn` file has dual purpose. The same 768 bytes (256×RGB) serve as:
-- The decode palette for the companion `.i2d` sprite
-- A 16×16 pixel thumbnail preview when interpreted as raw RGB888
+A `.tn` file (768 bytes) has dual purpose:
+- **Bytes 0–511 (X1R5G5B5):** 256 × uint16 LE palette → decoded as R=bits14-10, G=bits9-5, B=bits4-0
+- **Thumbnail:** All 768 bytes re-interpreted as `Image.frombytes('RGB', (16,16), data)` for
+  a rough 16×16 preview grid (not accurate RGB88, but acceptable for thumbnails)
 
 ### Discovery 6: Chunk Table NOT at Fixed Offset
 The chunk table must be found by scanning for the `[5, n_cols, n_rows]` signature.
@@ -621,6 +629,26 @@ When multi-chunk offsets are resolved, `chunk_end` can exceed `len(payload)` bec
 Fix: `chunk_end = min(chunk_end, len(payload))` at the top of `_decode_chunk`.
 Without this clamp, IndexError was triggered on ≈600 sprites, silently returning None.
 
+### Discovery 23: Palette Format is X1R5G5B5 (R=high), NOT BGR555 (R=low)
+**Critical correction:** Early code read the palette as `R=(word & 0x1F)<<3` (R in low bits),
+which is true DirectDraw BGR555 but produces completely wrong sprite colours.
+
+Empirically confirmed by comparison-rendering `forbirch001.i2d` with 4 interpretations:
+- **RGB888 (768 bytes raw):** garbled random bright colours — WRONG
+- **BGR888 (byte-swapped):** also garbled — WRONG
+- **X1R5G5B5 `R=((word>>10)&0x1F)<<3, B=(word&0x1F)<<3`:** dark olive/green birch tree — CORRECT ✅
+- **BGR555 `R=(word&0x1F)<<3, B=((word>>10)&0x1F)<<3`:** R/B swapped vs correct — slightly off
+
+The SPalette struct comment in the original source says "BGR555" but the *actual* bit layout
+used by the game's DirectDraw surface is **X1R5G5B5** (same as D3DFMT_X1R5G5B5 / DDPF_RGB
+with `dwRBitMask=0x7C00`). R occupies the high 5 bits, B the low 5 bits.
+
+Fix applied in commit a65f858:
+- `_bgr555_to_rgb888`: corrected to R=bits14-10, G=bits9-5, B=bits4-0
+- `_load_palette`: now reads 512 bytes (X1R5G5B5) instead of 768 bytes (RGB888)
+- `_decode_comp0`: same fix for TBitmapData palette path and 16-bit direct-pixel path
+- `.tn` files: only first 512 bytes read for palette (bytes 512-767 are ARGB/thumbnail data)
+
 ---
 
 ## Implementation Progress
@@ -730,6 +758,23 @@ TOTAL: 2529 OK / 125 fail  →  after all fixes: 2650 OK / 4 fail
 ```
 *Misc failures are `automap.i2d` (hdr_size=8, map format), `blood.i2d` (w=h=0),
  and `dunwwwf.i2d` (wildly mismatched nc/nr) — legitimately different formats.
+
+### Commit 6 — 2026-03-09 (a65f858) — Palette format correction (X1R5G5B5)
+
+Critical fix: all sprites were rendering with completely wrong colours since the
+palette format was misidentified as raw RGB888 (768 bytes). Actual format is
+**X1R5G5B5** (256 × uint16 LE, 512 bytes).
+
+- **`decoders/i2d.py`**:
+  - `_bgr555_to_rgb888`: corrected bit-field order — R=bits14-10 (high), B=bits4-0 (low)
+  - `_load_palette`: reads 512 bytes (X1R5G5B5) instead of 768 bytes (raw RGB888)
+    for both embedded SPalette and `.tn` file sources
+  - `_decode_comp0`: same 512-byte fix for TBitmapData palette path
+  - Direct 16-bit pixel path: corrected channel order to match (was also swapped)
+- Documentation (`REVENANT_REVERSE_ENGINEERING.md`): corrected palette format
+  throughout, added Discovery 23, updated `.tn` file format section
+
+Coverage unchanged: **2650/2654 (99.8%)** — same 4 legitimately-different files fail.
 
 ---
 
@@ -1119,7 +1164,8 @@ Includes: Forest, Town, Dungeon, Cave, Keep, KeepInt, Ruin, Labyrnth, TownInt, M
 ### `test_tn.py`
 **Purpose:** Diagnostic — verified .tn file format.
 Reads Forest + Equip .tn files; prints size, palette entries, non-zero count.
-Confirmed: 768 bytes, 256-colour RGB palette, index 0 often black (transparent).
+Confirmed: 768 bytes; first 512 = X1R5G5B5 palette (256 × uint16 LE), bytes 512-767 = ARGB/thumbnail data.
+Index 0 is transparent (decoder forces alpha=0 regardless of stored colour).
 
 ---
 
@@ -1235,4 +1281,4 @@ a615619  feat(i2d): massively improve sprite decoder coverage (155→2650 OK)
 
 ---
 
-*Last updated: 2026-03-08 — Added i3d geometry decoder, LZ back-ref (confirmed format), ModelViewer3D, dynamic sprite categories, batch PNG export, TBitmapData dual-path decoder, 16-bit BGR555 pixel support, i2d coverage 99.8% (2650/2654).*
+*Last updated: 2026-03-09 — Corrected palette format to X1R5G5B5 (512 bytes, R=high bits); fixed _bgr555_to_rgb888 channel order; all sprites now render with correct colours. i2d coverage 99.8% (2650/2654).*
