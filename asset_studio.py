@@ -1701,24 +1701,24 @@ class SpritesTab(tk.Frame):
         self._ph_cache.clear()
 
         # Collect (tn_path, i2d_path) pairs
-        tn_files = sorted(tn_dir.glob("*.tn")) + sorted(tn_dir.glob("*.TN"))
+        # On Windows glob("*.tn") already matches .TN (case-insensitive FS),
+        # so combining both patterns produces duplicates — deduplicate by stem.
+        _seen: set[str] = set()
+        tn_files: list[Path] = []
+        for f in sorted(tn_dir.iterdir()):
+            if f.suffix.lower() == ".tn" and f.stem.lower() not in _seen:
+                _seen.add(f.stem.lower())
+                tn_files.append(f)
+        # Build a lowercase stem→path index for i2d files in img_dir (fast lookup)
+        i2d_index: dict[str, Path] = {}
+        if img_dir.exists():
+            for f in img_dir.iterdir():
+                if f.suffix.lower() == ".i2d":
+                    i2d_index[f.stem.lower()] = f
+
         pairs: list[tuple[Path, Path]] = []
         for tn in tn_files:
-            # Find matching i2d (case-insensitive)
-            i2d = Path("")
-            if img_dir.exists():
-                stem = tn.stem
-                for ext in (".i2d", ".I2D"):
-                    cand = img_dir / (stem + ext)
-                    if cand.exists():
-                        i2d = cand
-                        break
-                if not i2d.exists():
-                    # Case-insensitive search
-                    for f in img_dir.iterdir():
-                        if f.stem.lower() == stem.lower() and f.suffix.lower() == ".i2d":
-                            i2d = f
-                            break
+            i2d = i2d_index.get(tn.stem.lower(), Path(""))
             pairs.append((tn, i2d))
         self._tn_items = pairs
 
