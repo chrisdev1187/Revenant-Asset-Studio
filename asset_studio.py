@@ -960,6 +960,10 @@ class EquipmentTab(tk.Frame):
         self._arm_detail.tag_configure("h",  foreground=ACCENT3, font=("Segoe UI",10,"bold"))
         self._arm_detail.tag_configure("kv", foreground=ACCENT2, font=("Segoe UI",9))
 
+        # tn thumbnail display
+        self._arm_img_lbl = tk.Label(det2, bg=BG_PANEL)
+        self._arm_img_lbl.pack(pady=4)
+
     def _load_all(self):
         self._status.set("Parsing weapon.def...")
         self._weapons = parse_weapon_def()
@@ -1061,6 +1065,9 @@ class EquipmentTab(tk.Frame):
         row("Resist Poison",str(a["resist_psn"]))
         row("Combining",    str(a["combining"]))
         txt.configure(state="disabled")
+
+        # Try to load .tn thumbnail
+        self._load_equip_tn(name.lower(), self._arm_img_lbl)
 
     def _load_equip_tn(self, name: str, lbl: tk.Label):
         """Try to load .tn thumbnail from Thumbnails/Equip/ folder."""
