@@ -1075,8 +1075,9 @@ class EquipmentTab(tk.Frame):
             if f.suffix.lower() == '.tn' and (fn == norm or norm in fn or fn in norm):
                 try:
                     raw = f.read_bytes()
-                    if len(raw) >= 768:
-                        img = Image.frombytes('RGB', (16, 16), raw[:768])
+                    px  = _decode_tn_pixels(raw)
+                    if px is not None:
+                        img = Image.frombytes('RGB', (16, 16), px)
                         img = img.resize((64, 64), Image.NEAREST)
                         ph  = ImageTk.PhotoImage(img)
                         lbl.config(image=ph)
@@ -1802,15 +1803,45 @@ CELL_H      = 66   # grid cell height (image + name)
 GRID_COLS   = 8    # thumbnails per row
 
 
+def _decode_tn_pixels(raw: bytes) -> Optional[bytes]:
+    """
+    Decode a 768-byte .tn file to 768 bytes of flat RGB888 (16×16 image).
+
+    .tn format:
+      [0:512]   256 × uint16 LE X1R5G5B5 palette  (R=bits14-10, G=9-5, B=4-0)
+      [512:768] 256 bytes = 16×16 pixels as 8-bit palette indices
+    """
+    if len(raw) < 768:
+        return None
+    # Decode palette
+    pal = []
+    for i in range(256):
+        word = struct.unpack_from('<H', raw, i * 2)[0]
+        r = ((word >> 10) & 0x1F) << 3
+        g = ((word >>  5) & 0x1F) << 3
+        b = ( word        & 0x1F) << 3
+        pal.append((r, g, b))
+    # Map 16×16 indices to RGB
+    indices = raw[512:768]
+    pixels  = bytearray(256 * 3)
+    for j in range(256):
+        r, g, b = pal[indices[j]]
+        pixels[j * 3]     = r
+        pixels[j * 3 + 1] = g
+        pixels[j * 3 + 2] = b
+    return bytes(pixels)
+
+
 def _load_tn_image(tn_path: Path, size: int = THUMB_SIZE) -> Optional["Image.Image"]:
-    """Load a 16×16 raw RGB888 .tn file and scale to `size`×`size`."""
+    """Load a 16×16 .tn thumbnail (X1R5G5B5 palette + indexed pixels)."""
     if not HAS_PIL:
         return None
     try:
         raw = tn_path.read_bytes()
-        if len(raw) < 768:
+        px  = _decode_tn_pixels(raw)
+        if px is None:
             return None
-        img = Image.frombytes('RGB', (16, 16), raw[:768])
+        img = Image.frombytes('RGB', (16, 16), px)
         return img.resize((size, size), Image.NEAREST)
     except Exception:
         return None
