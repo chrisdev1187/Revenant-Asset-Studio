@@ -6,14 +6,35 @@ Run this first before any other RevEngine tools.
 
 Usage:
     py setup.py
+    py setup.py --game-dir "D:/Games/Revenant"
+    py setup.py --game-dir /path/to/revenant
 """
 
 import subprocess
 import sys
 import os
+import argparse
 from pathlib import Path
 
-GAME_DIR    = Path("C:/GOG Games/Revenant")
+# ── Path configuration ────────────────────────────────────────────────────────
+# Default: GOG install location. Override with --game-dir on the command line.
+_DEFAULT_GAME_DIR = Path("C:/GOG Games/Revenant")
+
+def _parse_args():
+    parser = argparse.ArgumentParser(
+        description="RevEngine setup: install deps + extract game archives",
+        add_help=True,
+    )
+    parser.add_argument(
+        "--game-dir", metavar="PATH",
+        help=f"Path to Revenant installation (default: {_DEFAULT_GAME_DIR})",
+    )
+    # Allow running with no args (interactive mode)
+    args, _ = parser.parse_known_args()
+    return args
+
+_ARGS = _parse_args()
+GAME_DIR    = Path(_ARGS.game_dir) if _ARGS.game_dir else _DEFAULT_GAME_DIR
 EXTRACT_DIR = GAME_DIR / "_extracted"
 ENGINE_DIR  = GAME_DIR / "RevEngine"
 

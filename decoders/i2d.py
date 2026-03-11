@@ -22,11 +22,11 @@ COMPRESSED PIXEL STREAM (from ChunkDecompress inline ASM)
 
   DH escape (LZ back-reference, 4-byte token total):
       DH + count + dist_lo + dist_hi
-      → copy `count` raw bytes from source buffer position (P_dh − dist)
-         where P_dh = absolute position of the DH byte inside `payload`
+      → copy `count` bytes from DECOMPRESSED output at (di − dist − 4)
+         where di   = current output position in the 64×64 chunk_buf
          and   dist = uint16 little-endian (dist_lo | dist_hi<<8)
-      Back-references can span across chunk boundaries (the game loads the
-      entire imagery payload as one buffer).  Out-of-bounds → transparent.
+      The −4 is a constant bias baked into the encoder (confirmed by depy/RevenantRE).
+      Source is the LOCAL chunk_buf (decompressed output), NOT the compressed input.
 
 PALETTE (confirmed from bitmapdata.h / SPalette struct)
   SPalette is embedded in the i2d at a self-relative OFFSET that lies 8 bytes
@@ -235,18 +235,20 @@ def _find_chunk_table(payload: bytes,
             continue
         n_chunks = nc * nr
         if n_chunks == 1:
-            # Single chunk: data starts directly at SChunkHeader+16 (no offset table)
-            if i + 22 <= len(payload):   # need ≥ 6 bytes after header
+            # Single chunk: data starts directly at SChunkHeader+12 (no offset table)
+            if i + 18 <= len(payload):   # need ≥ 6 bytes after 12-byte header
                 return (i, nc, nr)
         else:
-            offsets_start = i + 16
+            offsets_start = i + 12       # SChunkHeader is 12 bytes: [type][nc][nr]
             if offsets_start + n_chunks * 4 > len(payload):
                 continue
-            ct_base   = i - 32
-            max_valid = len(payload) - ct_base
+            # Each offset is self-relative from its own field position.
+            # abs = (offsets_start + k*4) + entry_value
             for k in range(n_chunks):
-                off = struct.unpack_from('<I', payload, offsets_start + k * 4)[0]
-                if 0 < off < max_valid:
+                field_pos = offsets_start + k * 4
+                off = struct.unpack_from('<I', payload, field_pos)[0]
+                abs_pos = field_pos + off
+                if 0 < abs_pos < len(payload):
                     return (i, nc, nr)   # found a valid table
     return None
 
@@ -285,24 +287,20 @@ def _decode_chunk(payload: bytes,
 
     # Chunk-local 64×64 palette-index buffer (all 0 = transparent initially)
     chunk_buf = bytearray(CHUNK_PX * CHUNK_PX)
-    x, y = 0, 0
+    di = 0    # linear output position in chunk_buf (0..4095)
+    y  = 0    # row counter — incremented ONLY by EOL tokens (mirrors ASM ECX)
+              # The encoder guarantees exactly CHUNKWIDTH pixels of output per
+              # row before emitting EOL, so _put/_skip never need to wrap y.
 
     def _put(color: int) -> None:
-        nonlocal x, y
-        if 0 <= x < CHUNK_PX and 0 <= y < CHUNK_PX:
-            chunk_buf[y * CHUNK_PX + x] = color
-        x += 1
-        if x >= CHUNK_PX:
-            x = 0
-            y += 1
+        nonlocal di
+        if di < CHUNK_PX * CHUNK_PX:
+            chunk_buf[di] = color
+        di += 1
 
     def _skip(n: int) -> None:
-        """Advance x by n transparent positions (wraps to next rows)."""
-        nonlocal x, y
-        x += n
-        while x >= CHUNK_PX:
-            x -= CHUNK_PX
-            y += 1
+        nonlocal di
+        di += n
 
     while i < chunk_end and y < CHUNK_PX:
         b = payload[i]; i += 1
@@ -314,9 +312,13 @@ def _decode_chunk(payload: bytes,
             cmd = payload[i]; i += 1
 
             if cmd == 0:
-                # EOL — end of current row
+                # EOL — sole row-counter advance (mirrors ASM 'dec ecx').
+                # Pad di to the true next-row boundary in case a transparent
+                # skip left us short (the encoder may omit trailing row skips).
+                row_end = (y + 1) * CHUNK_PX
+                if di < row_end:
+                    di = row_end
                 y += 1
-                x  = 0
 
             elif cmd & 0x80:
                 # Transparent skip: advance output by (cmd & 0x7F) pixels
@@ -329,26 +331,26 @@ def _decode_chunk(payload: bytes,
                 color = payload[i]; i += 1
                 for _ in range(cmd):
                     _put(color)
-                    if y >= CHUNK_PX:
-                        break
 
         elif b == dh:
             # ── LZ back-reference ─────────────────────────────────────────
             # Token: [DH][count][dist_lo][dist_hi]   (4 bytes total)
-            # Copies `count` raw bytes from payload[p_dh − dist]
-            # where p_dh = absolute offset of the DH byte.
+            # Faithful port of ChunkDecompress ASM (chunkcache.cpp):
+            #   ESI_save = ESI (position after full 4-byte LZ token)
+            #   src = ESI_save - dist - 4  (in compressed stream)
+            #   Copy `count` bytes from payload[src..] to output.
+            # This copies from the COMPRESSED INPUT STREAM (not decompressed output).
             if i + 2 > chunk_end:
                 i = min(i + 3, chunk_end)
                 break
-            p_dh  = i - 1                               # DH byte position in payload
             count = payload[i];       i += 1
             dist  = payload[i] | (payload[i + 1] << 8); i += 2
 
-            src = p_dh - dist
+            # i is now ESI_save (just past the LZ token in the compressed stream)
+            lz_src = i - dist - 4
             for k in range(count):
-                if y >= CHUNK_PX:
-                    break
-                _put(payload[src + k] if src + k >= 0 else 0)
+                src_val = payload[lz_src + k] if 0 <= lz_src + k < len(payload) else 0
+                _put(src_val)
 
         else:
             # ── Raw pixel ─────────────────────────────────────────────────
@@ -467,8 +469,8 @@ def _decode_comp0(raw: bytes, width: int, height: int,
     if flags & 0x4000:
         # ── Compressed: SChunkHeader type=5 embedded at data8[0] ─────────────
         # SChunkHeader layout in data8:
-        #   [0:4]  type=5, [4:8] n_cols, [8:12] n_rows, [12:16] unk
-        #   [16:]  for n_chunks>1: offset table (n_chunks uint32 offsets)
+        #   [0:4]  type=5, [4:8] n_cols, [8:12] n_rows
+        #   [12:]  for n_chunks>1: offset table (n_chunks uint32 self-relative offsets)
         #          for n_chunks=1: chunk data starts here directly
 
         n_cols   = (fs_w + CHUNK_PX - 1) // CHUNK_PX
@@ -480,19 +482,16 @@ def _decode_comp0(raw: bytes, width: int, height: int,
         pixels   = bytearray(canvas_w * canvas_h)
 
         if n_chunks == 1:
-            # Single chunk: data starts at data8[16] (no offset table entry)
-            chunk_abs = data8_start + 16
+            # Single chunk: data starts at data8[12] (no offset table entry)
+            chunk_abs = data8_start + 12
             chunk_end = data8_start + datasize
             if chunk_abs + 6 <= len(payload):
                 _decode_chunk(payload, chunk_abs, chunk_end,
                               pixels, canvas_w, 0, 0, canvas_w, canvas_h)
         else:
-            # Multi-chunk: offset table at data8[16..16+n_chunks*4]
-            # Chunk offsets are relative to ct_base = data8_start - 32
-            # (consistent with how the regular decoder's ct_base = ct_type_off - 32
-            #  maps to the 32 bytes before the type=5 field in the buffer)
-            ct_base       = data8_start - 32      # in payload coords
-            offsets_start = data8_start + 16      # in payload coords
+            # Multi-chunk: offset table at data8[12..12+n_chunks*4]
+            # Each entry is SELF-RELATIVE: abs = field_position + entry_value
+            offsets_start = data8_start + 12      # in payload coords
 
             offsets = [
                 struct.unpack_from('<I', payload, offsets_start + k * 4)[0]
@@ -504,13 +503,16 @@ def _decode_comp0(raw: bytes, width: int, height: int,
                     continue
                 col = idx % n_cols
                 row = idx // n_cols
-                abs_off = ct_base + off
+                field_pos = offsets_start + idx * 4
+                abs_off   = field_pos + off
                 if abs_off < 0 or abs_off + 6 >= len(payload):
                     continue
                 chunk_end = len(payload)
-                for next_off in offsets[idx + 1:]:
-                    if 0 < next_off:
-                        cand = ct_base + next_off
+                for next_idx in range(idx + 1, n_chunks):
+                    next_field = offsets_start + next_idx * 4
+                    next_off   = offsets[next_idx]
+                    if next_off > 0:
+                        cand = next_field + next_off
                         if cand > abs_off:
                             chunk_end = cand
                             break
@@ -608,8 +610,10 @@ def decode_i2d(path: Path, use_alpha: bool = True) -> Optional["Image"]:
 
     ct_type_off, n_cols, n_rows = result_ct   # use ACTUAL stored grid dims
     n_chunks      = n_cols * n_rows
-    ct_base       = ct_type_off - 32
-    offsets_start = ct_type_off + 16          # block[0] starts here
+    # SChunkHeader is 12 bytes: [type(4)][nc(4)][nr(4)]
+    # Offset table starts immediately after at ct_type_off+12.
+    # Each entry is SELF-RELATIVE: abs = field_position + entry_value
+    offsets_start = ct_type_off + 12          # block[0] field starts here
 
     # ── Load palette ─────────────────────────────────────────────────────────
     pal_flat  = _load_palette(path, payload, ct_type_off)
@@ -622,8 +626,8 @@ def decode_i2d(path: Path, use_alpha: bool = True) -> Optional["Image"]:
 
     # ── Decode each chunk ────────────────────────────────────────────────────
     if n_chunks == 1:
-        # Single chunk: data starts directly at SChunkHeader+16 (no offset table)
-        chunk_abs = offsets_start          # = ct_type_off + 16
+        # Single chunk: data starts directly at SChunkHeader+12 (no offset table)
+        chunk_abs = offsets_start          # = ct_type_off + 12
         _decode_chunk(payload, chunk_abs, len(payload),
                       pixels, canvas_w, 0, 0, canvas_w, canvas_h)
     else:
@@ -640,17 +644,21 @@ def decode_i2d(path: Path, use_alpha: bool = True) -> Optional["Image"]:
                 continue                         # empty / transparent tile
             col = idx % n_cols
             row = idx // n_cols
-            abs_off = ct_base + off
+            # Self-relative: abs = field_position + entry_value
+            field_pos = offsets_start + idx * 4
+            abs_off   = field_pos + off
             if abs_off < 0 or abs_off + 6 >= len(payload):
                 continue
 
-            # Determine chunk data end: next non-zero offset (exclusive)
+            # Determine chunk data end: next non-zero chunk's abs position
             chunk_end = len(payload)
-            for next_off in offsets[idx + 1:]:
-                if 0 < next_off:
-                    candidate = ct_base + next_off
-                    if candidate > abs_off:
-                        chunk_end = candidate
+            for next_idx in range(idx + 1, n_chunks):
+                next_field = offsets_start + next_idx * 4
+                next_off   = offsets[next_idx]
+                if next_off > 0:
+                    cand = next_field + next_off
+                    if cand > abs_off:
+                        chunk_end = cand
                         break
 
             _decode_chunk(

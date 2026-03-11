@@ -1424,10 +1424,27 @@ class ScriptsTab(tk.Frame):
 
 class ModelViewer3D(tk.Frame):
     """
-    Orthographic wireframe viewer for i3d geometry.
-    Drag to rotate, scroll wheel to zoom.
+    Solid flat-shaded viewer for i3d geometry with back-face culling.
+
+    Rendering pipeline:
+      1. Rotate all vertices by azimuth (Y-axis) then elevation (X-axis).
+      2. Project to 2-D canvas with orthographic projection.
+      3. For each face: compute view-space face normal via cross product.
+         Back-face cull (dot with view direction < 0).
+      4. Painter's algorithm: sort surviving faces back-to-front by avg Z.
+      5. Flat shade each face: diffuse = dot(face_normal, light_dir) clamped
+         to [0, 1]; ambient floor of 0.25 so dark sides are still visible.
+      6. Draw filled polygon + thin edge for crispness.
     Falls back to a point cloud when no face data is available.
     """
+
+    # Base body colour in RGB (D3D-blue steel)
+    _BASE_R = 0x2A
+    _BASE_G = 0x55
+    _BASE_B = 0x8F
+
+    # Edge overlay colour
+    _EDGE_COL  = "#1a2d50"
 
     def __init__(self, parent, **kwargs):
         super().__init__(parent, bg=BG_DARK, **kwargs)
@@ -1478,6 +1495,39 @@ class ModelViewer3D(tk.Frame):
         self._zoom = max(0.05, min(20.0, self._zoom * (1.1 if e.delta > 0 else 0.9)))
         self._redraw()
 
+    # ── Geometry helpers ───────────────────────────────────────────────────────
+
+    @staticmethod
+    def _cross(a, b):
+        return (a[1]*b[2] - a[2]*b[1],
+                a[2]*b[0] - a[0]*b[2],
+                a[0]*b[1] - a[1]*b[0])
+
+    @staticmethod
+    def _dot(a, b):
+        return a[0]*b[0] + a[1]*b[1] + a[2]*b[2]
+
+    @staticmethod
+    def _sub(a, b):
+        return (a[0]-b[0], a[1]-b[1], a[2]-b[2])
+
+    @staticmethod
+    def _normalize(v):
+        d = math.sqrt(v[0]*v[0] + v[1]*v[1] + v[2]*v[2])
+        if d < 1e-9:
+            return (0.0, 1.0, 0.0)
+        return (v[0]/d, v[1]/d, v[2]/d)
+
+    @staticmethod
+    def _shade_hex(r_base, g_base, b_base, intensity: float) -> str:
+        """Map a [0..1] intensity onto a shaded colour string."""
+        # Ambient + diffuse, gamma-corrected feel via sqrt
+        t = 0.25 + 0.75 * max(0.0, min(1.0, intensity))
+        r = int(r_base * t)
+        g = int(g_base * t)
+        b = int(b_base * t)
+        return f"#{r:02x}{g:02x}{b:02x}"
+
     def _redraw(self):
         c  = self._canvas
         cw = c.winfo_width()  or 300
@@ -1489,58 +1539,80 @@ class ModelViewer3D(tk.Frame):
                           fill=FG_MUTED, font=("Segoe UI", 10))
             return
 
-        # ── Rotate vertices ────────────────────────────────────────────────
+        # ── Step 1: rotate vertices into view space ────────────────────────
         az, el = self._az, self._el
         caz, saz = math.cos(az), math.sin(az)
         cel, sel = math.cos(el), math.sin(el)
 
         rot = []
         for x, y, z in self._verts:
-            # Y-axis rotation (azimuth)
+            # Revenant D3D left-handed: Y-up. Rotate around Y (azimuth) first.
             rx =  x * caz + z * saz
             ry =  y
             rz = -x * saz + z * caz
-            # X-axis rotation (elevation)
+            # Then tilt around X (elevation)
             rot.append((rx,
-                         ry * cel - rz * sel,
-                         ry * sel + rz * cel))
+                        ry * cel - rz * sel,
+                        ry * sel + rz * cel))
 
-        # ── Scale to fit canvas ────────────────────────────────────────────
-        xs = [v[0] for v in rot]; ys = [v[1] for v in rot]
+        # ── Step 2: auto-scale + orthographic project ──────────────────────
+        xs = [v[0] for v in rot]
+        ys = [v[1] for v in rot]
         cx_v = (max(xs) + min(xs)) / 2
         cy_v = (max(ys) + min(ys)) / 2
-        span = max(max(xs) - min(xs), max(ys) - min(ys), 1e-6)
+        span  = max(max(xs) - min(xs), max(ys) - min(ys), 1e-6)
         scale = self._zoom * min(cw, ch) * 0.42 / span
 
         def proj(v):
-            return (int(cw // 2 + (v[0] - cx_v) * scale),
-                    int(ch // 2 - (v[1] - cy_v) * scale),
+            return (cw // 2 + (v[0] - cx_v) * scale,
+                    ch // 2 - (v[1] - cy_v) * scale,
                     v[2])
 
         pts = [proj(v) for v in rot]
 
-        # ── Draw faces or point cloud ──────────────────────────────────────
+        # ── Step 3-6: draw faces ───────────────────────────────────────────
         if self._faces:
-            # Painter's algorithm: sort faces back→front (lowest avg Z first)
-            def _fz(f):
-                a, b, fc = f
-                if a < len(pts) and b < len(pts) and fc < len(pts):
-                    return (pts[a][2] + pts[b][2] + pts[fc][2]) / 3
-                return 0
+            # Fixed light direction in view space (upper-left, slightly forward)
+            light = self._normalize((-0.5, 0.8, 0.6))
 
-            edge_col  = "#3a5a9a"
-            for face in sorted(self._faces, key=_fz):
-                a, b, fc = face
-                if a >= len(pts) or b >= len(pts) or fc >= len(pts):
+            # Build list of (avg_z, face_tuple, shade_colour)
+            draw_list = []
+            for face in self._faces:
+                ia, ib, ic = face
+                if ia >= len(pts) or ib >= len(pts) or ic >= len(pts):
                     continue
-                ax, ay, _ = pts[a]
-                bx, by, _ = pts[b]
-                cx_, cy_, _ = pts[fc]
-                c.create_line(ax, ay, bx, by, fill=edge_col, width=1)
-                c.create_line(bx, by, cx_, cy_, fill=edge_col, width=1)
-                c.create_line(cx_, cy_, ax, ay, fill=edge_col, width=1)
+                pa = pts[ia]; pb = pts[ib]; pc = pts[ic]
+
+                # Face normal via cross product of screen-space edges
+                # (using the 3-D rotated positions stored in rot[] for accuracy)
+                ra = rot[ia]; rb = rot[ib]; rc = rot[ic]
+                ab = self._sub(rb, ra)
+                ac = self._sub(rc, ra)
+                fn = self._cross(ab, ac)
+
+                # Back-face culling: view direction is (0, 0, 1) in view space
+                # (we're looking down +Z). Cull faces where normal Z <= 0.
+                if fn[2] <= 0:
+                    continue
+
+                fn_n = self._normalize(fn)
+                intensity = self._dot(fn_n, light)
+
+                avg_z = (pa[2] + pb[2] + pc[2]) / 3.0
+                colour = self._shade_hex(
+                    self._BASE_R, self._BASE_G, self._BASE_B, intensity
+                )
+                draw_list.append((avg_z, pa, pb, pc, colour))
+
+            # Painter's algorithm: back-to-front (highest Z drawn last = front)
+            draw_list.sort(key=lambda t: t[0])
+
+            for avg_z, pa, pb, pc, colour in draw_list:
+                coords = [pa[0], pa[1], pb[0], pb[1], pc[0], pc[1]]
+                c.create_polygon(coords, fill=colour,
+                                 outline=self._EDGE_COL, width=1)
         else:
-            # Point cloud
+            # Point cloud fallback
             dot_col = "#5080d0"
             r = max(1, int(scale * 0.05))
             for px, py, _ in pts:
@@ -1749,7 +1821,7 @@ class ModelsTab(tk.Frame):
             if geom:
                 info = (f"{len(geom.vertices):,} verts  ·  "
                         f"{len(geom.faces):,} faces  ·  "
-                        f"stride {geom.stride} B")
+                        f"stride {geom.stride} B  ·  {geom.decode_method}")
             else:
                 info = "Geometry format not detected"
             self.after(0, lambda: self._viewer.load(
