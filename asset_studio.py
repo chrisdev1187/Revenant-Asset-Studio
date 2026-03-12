@@ -25,7 +25,21 @@ from pathlib import Path
 from typing import Optional, List, Dict, Tuple
 
 # ─── Paths ───────────────────────────────────────────────────────────────────
-GAME_DIR    = Path("C:/GOG Games/Revenant")
+# Default: GOG install location. Override via --game-dir on the command line.
+_DEFAULT_GAME_DIR = Path("C:/GOG Games/Revenant")
+
+def _resolve_game_dir() -> Path:
+    import sys
+    for i, arg in enumerate(sys.argv[1:], 1):
+        if arg in ("--game-dir", "--game_dir") and i < len(sys.argv):
+            return Path(sys.argv[i + 1])
+        if arg.startswith("--game-dir="):
+            return Path(arg.split("=", 1)[1])
+        if arg.startswith("--game_dir="):
+            return Path(arg.split("=", 1)[1])
+    return _DEFAULT_GAME_DIR
+
+GAME_DIR    = _resolve_game_dir()
 EXTRACT_DIR = GAME_DIR / "_extracted"
 ENGINE_DIR  = GAME_DIR / "RevEngine"
 IMAGERY     = EXTRACT_DIR / "imagery"
@@ -90,7 +104,6 @@ def parse_char_def() -> List[Dict]:
     text = _read_def(CHAR_DEF)
     chars = []
 
-    # Split into CHARACTER blocks
     pattern = re.compile(
         r'CHARACTER\s+"([^"]+)"[^\n]*\nBEGIN(.*?)END',
         re.DOTALL
@@ -98,9 +111,8 @@ def parse_char_def() -> List[Dict]:
     for m in pattern.finditer(text):
         name  = m.group(1).strip()
         body  = m.group(2)
-        entry = {"name": name}
+        entry = {"name": name, "_raw": body.strip()}
 
-        # Extract key tags
         def _get(tag, default=""):
             rx = re.search(rf'\b{tag}\s+"?([^"\n]+)"?', body)
             return rx.group(1).strip() if rx else default
@@ -108,26 +120,65 @@ def parse_char_def() -> List[Dict]:
         def _get_nums(tag):
             rx = re.search(rf'\b{tag}\b\s+([\d,\s\-]+)', body)
             if rx:
-                return [int(x.strip()) for x in rx.group(1).split(',') if x.strip().lstrip('-').isdigit()]
+                return [int(x.strip()) for x in rx.group(1).split(',')
+                        if x.strip().lstrip('-').isdigit()]
             return []
 
-        entry["class"]    = _get("CLASS")
-        entry["groups"]   = _get("GROUPS")
-        entry["enemies"]  = _get("ENEMIES")
+        entry["class"]      = _get("CLASS")
+        entry["groups"]     = _get("GROUPS")
+        entry["enemies"]    = _get("ENEMIES")
+        entry["script"]     = _get("SCRIPT")
+        entry["sound"]      = _get("SOUND")
 
         sight = _get_nums("SIGHT")
-        entry["sight"] = sight[2] if len(sight) >= 3 else 0
+        entry["sight"] = sight[2] if len(sight) >= 3 else (sight[0] if sight else 0)
 
         block = _get_nums("BLOCK")
         entry["block_pct"] = block[0] if block else 0
 
-        entry["weapon_dmg"] = _get_nums("WEAPONDAMAGE")[0] if _get_nums("WEAPONDAMAGE") else 0
+        entry["weapon_dmg"]  = _get_nums("WEAPONDAMAGE")[0] if _get_nums("WEAPONDAMAGE") else 0
 
-        # Count ATTACKs
-        entry["attack_count"] = len(re.findall(r'\bATTACK\b', body))
+        health = _get_nums("HEALTH")
+        entry["health"]      = health[0] if health else 0
 
-        # Count IMPACTs
-        entry["impact_count"] = len(re.findall(r'\bIMPACT\b', body))
+        speed = _get_nums("SPEED")
+        entry["speed"]       = speed[0] if speed else 0
+
+        # Parse individual ATTACK blocks: ATTACK "name" BEGIN ... END
+        attack_blocks = re.findall(
+            r'ATTACK\s+"?([^"\n]+)"?\s+BEGIN(.*?)END', body, re.DOTALL)
+        entry["attacks"] = []
+        for aname, abody in attack_blocks:
+            atk = {"name": aname.strip()}
+            dmg = re.search(r'\bDAMAGE\b\s+([\d\s,]+)', abody)
+            atk["damage"] = dmg.group(1).strip() if dmg else ""
+            anim = re.search(r'\bANIMATION\s+"?([^"\n]+)"?', abody)
+            atk["anim"] = anim.group(1).strip() if anim else ""
+            entry["attacks"].append(atk)
+        # Fallback: bare ATTACK count
+        if not entry["attacks"]:
+            entry["attack_count"] = len(re.findall(r'\bATTACK\b', body))
+        else:
+            entry["attack_count"] = len(entry["attacks"])
+
+        # Parse IMPACT blocks similarly
+        impact_blocks = re.findall(
+            r'IMPACT\s+"?([^"\n]+)"?\s+BEGIN(.*?)END', body, re.DOTALL)
+        entry["impacts"] = []
+        for iname, ibody in impact_blocks:
+            entry["impacts"].append({"name": iname.strip()})
+        if not entry["impacts"]:
+            entry["impact_count"] = len(re.findall(r'\bIMPACT\b', body))
+        else:
+            entry["impact_count"] = len(entry["impacts"])
+
+        # Spells the character can cast
+        spells = re.findall(r'\bSPELL\s+"?([^"\n]+)"?', body)
+        entry["spells"] = [s.strip() for s in spells]
+
+        # Animation state names referenced in char body
+        anims = re.findall(r'\bANIMATION\s+"?([^"\n]+)"?', body)
+        entry["anim_refs"] = sorted(set(a.strip() for a in anims))
 
         chars.append(entry)
 
@@ -246,98 +297,162 @@ def find_portrait(char_name: str) -> Optional[Path]:
 
 def parse_i3d_anim_count(path: Path) -> int:
     """Return animation state count from an i3d file header."""
+    return len(parse_i3d_anim_states(path))
+
+
+def parse_i3d_anim_states(path: Path) -> List[Dict]:
+    """Return list of animation states: [{name, frames}, ...].
+
+    CGSR header (84 bytes):
+      0x00 magic='CGSR', 0x06 topbm(2), 0x10 hdrsize(4)
+    Per-state header (32 bytes each), starting at byte 52:
+      +0  pad(4), +4 frame_count(4), +8 name(8 bytes, C string),
+      +24 width(2), +26 height(2), +28 regx(2), +30 regy(2)
+    """
+    states = []
     try:
         raw = path.read_bytes()
-        if len(raw) < 0x1C or raw[:4] != b'CGSR':
-            return 0
-        return struct.unpack_from('<I', raw, 0x18)[0]
+        if len(raw) < 84 or raw[:4] != b'CGSR':
+            return states
+        topbm    = struct.unpack_from('<H', raw, 0x06)[0]
+        hdrsize  = struct.unpack_from('<I', raw, 0x10)[0]
+        n_states = topbm + 1
+        state_base = 52  # per-state headers start at byte 52
+        for i in range(n_states):
+            off = state_base + i * 32
+            if off + 32 > hdrsize:
+                break
+            frames = struct.unpack_from('<I', raw, off + 4)[0]
+            name_bytes = raw[off + 8: off + 16]
+            name = name_bytes.split(b'\x00')[0].decode('ascii', errors='replace')
+            w = struct.unpack_from('<H', raw, off + 24)[0] if off + 26 <= hdrsize else 0
+            h = struct.unpack_from('<H', raw, off + 26)[0] if off + 28 <= hdrsize else 0
+            states.append({"name": name or f"state{i}", "frames": frames,
+                           "width": w, "height": h})
     except Exception:
-        return 0
+        pass
+    return states
 
 
-def get_automap_tiles(zone: int) -> List[Path]:
-    """Get all automap BMP tiles for a zone number."""
+def _all_automap_dirs() -> List[Path]:
+    """Return every Automaps/ directory found under _extracted/.
+
+    Revenant stores each game module (Ahkuilon, town interiors, dungeons, etc.)
+    as a separate subdirectory of _extracted/.  Each module that has been
+    extracted will contain an Automaps/ folder with its zone tiles.
+
+    Example layout:
+        _extracted/Ahkuilon/Automaps/      ← main outdoor world
+        _extracted/Arindale/Automaps/      ← town of Arindale
+        _extracted/OrcCamp/Automaps/       ← orc stronghold
+        _extracted/SomeDungeon/Automaps/   ← etc.
+    """
+    dirs = []
+    if not EXTRACT_DIR.exists():
+        return dirs
+    for child in sorted(EXTRACT_DIR.iterdir()):
+        if child.is_dir():
+            candidate = child / "Automaps"
+            if candidate.is_dir():
+                dirs.append(candidate)
+    return dirs
+
+
+# ZoneKey = (module_name, zone_number)  — uniquely identifies one map
+ZoneKey = Tuple[str, int]
+
+
+def get_all_zone_keys() -> List[ZoneKey]:
+    """Scan every module's Automaps/ and return (module, zone) pairs, sorted."""
+    seen: set = set()
+    for adir in _all_automap_dirs():
+        module = adir.parent.name          # e.g. "Ahkuilon", "Arindale"
+        for f in adir.rglob("*.bmp"):
+            parts = f.stem.split('_')
+            if len(parts) >= 3:
+                try:
+                    z = int(parts[0])
+                    seen.add((module, z))
+                except ValueError:
+                    pass
+    # Sort: Ahkuilon first (zone 0), then alphabetically by module, then by zone
+    return sorted(seen, key=lambda mk: (mk[0].lower() != "ahkuilon", mk[0].lower(), mk[1]))
+
+
+def get_automap_tiles(zone: int, module: str = "Ahkuilon") -> List[Path]:
+    """Get all automap BMP tiles for a (module, zone) pair."""
     tiles = []
-    automap_dir = AHKUILON / "Automaps"
-    if not automap_dir.exists():
+    adir = EXTRACT_DIR / module / "Automaps"
+    if not adir.exists():
+        # Fall back: search all modules
+        for d in _all_automap_dirs():
+            for f in d.rglob("*.bmp"):
+                parts = f.stem.split('_')
+                if len(parts) >= 3:
+                    try:
+                        if int(parts[0]) == zone:
+                            tiles.append(f)
+                    except ValueError:
+                        pass
         return tiles
-    prefix = f"{zone}_"
-    for f in automap_dir.iterdir():
-        if f.suffix.lower() == '.bmp' and f.name.startswith(prefix):
-            tiles.append(f)
+    for f in adir.rglob("*.bmp"):
+        parts = f.stem.split('_')
+        if len(parts) >= 3:
+            try:
+                if int(parts[0]) == zone:
+                    tiles.append(f)
+            except ValueError:
+                pass
     return tiles
 
 
 def get_available_zones() -> List[int]:
-    """Return sorted list of zone numbers that have automap tiles."""
-    automap_dir = AHKUILON / "Automaps"
-    if not automap_dir.exists():
-        return []
-    zones = set()
-    for f in automap_dir.iterdir():
-        if f.suffix.lower() == '.bmp':
-            parts = f.stem.split('_')
-            if parts:
-                try:
-                    zones.add(int(parts[0]))
-                except ValueError:
-                    pass
-    return sorted(zones)
+    """Return sorted list of unique zone numbers across ALL modules (legacy helper)."""
+    return sorted(set(z for _, z in get_all_zone_keys()))
 
 
-def stitch_zone_map(zone: int, tile_size: int = 64) -> Optional["Image.Image"]:
-    """Stitch all automap tiles for a zone into a single PIL Image.
+def stitch_zone_map(zone: int, module: str = "Ahkuilon",
+                    tile_size: int = 64) -> Optional["Image.Image"]:
+    """Stitch all automap tiles for a (module, zone) into a single PIL Image.
 
-    Tile filenames use the format:  Zone_Y_X.bmp
-    Y is a *signed* integer (negative values are common, e.g. 0_-10_25.bmp).
-    X may also be non-zero-based (e.g. 15-39 for zone 0).
-    We normalise both axes so the grid starts at (0, 0).
+    Tile filenames: <zone>_<X>_<Y>.bmp   X and Y may be negative.
     """
     if not HAS_PIL:
         return None
-    tiles = get_automap_tiles(zone)
+    tiles = get_automap_tiles(zone, module)
     if not tiles:
         return None
 
-    # Parse (Y, X) from filename: zone_Y_X.bmp  — Y/X are signed integers
     coords = []
     for t in tiles:
         parts = t.stem.split('_')
-        # stem may look like "0_-10_25" → split gives ['0', '-10', '25']
-        # but "0_-10" splits into ['0', '', '10'] with a leading '-' issue on
-        # some Python versions, so we re-join after the zone prefix to be safe.
         if len(parts) < 3:
             continue
         try:
-            # parts[0] = zone, parts[1] = Y (may be negative), parts[2] = X
-            y_val = int(parts[1])
-            x_val = int(parts[2])
-            coords.append((y_val, x_val, t))
+            coords.append((int(parts[1]), int(parts[2]), t))
         except ValueError:
             pass
 
     if not coords:
         return None
 
-    min_y = min(y for y, x, _ in coords)
-    min_x = min(x for y, x, _ in coords)
-    max_y = max(y for y, x, _ in coords)
-    max_x = max(x for y, x, _ in coords)
+    min_x = min(x for x, y, _ in coords)
+    max_x = max(x for x, y, _ in coords)
+    min_y = min(y for x, y, _ in coords)
+    max_y = max(y for x, y, _ in coords)
 
-    n_cols = max_x - min_x + 1
-    n_rows = max_y - min_y + 1
+    canvas = Image.new('RGB',
+                       (tile_size * (max_x - min_x + 1),
+                        tile_size * (max_y - min_y + 1)),
+                       (20, 20, 30))
 
-    canvas_w = n_cols * tile_size
-    canvas_h = n_rows * tile_size
-    canvas = Image.new('RGB', (canvas_w, canvas_h), (20, 20, 30))
-
-    for y_val, x_val, path in coords:
-        norm_col = x_val - min_x
-        # Y axis: most-negative Y (northernmost) maps to top row (row 0)
-        norm_row = y_val - min_y
+    for x_val, y_val, path in coords:
+        paste_x = tile_size * (x_val - min_x)
+        paste_y = tile_size * (y_val - min_y)
         try:
-            tile = Image.open(path).convert('RGB').resize((tile_size, tile_size), Image.NEAREST)
-            canvas.paste(tile, (norm_col * tile_size, norm_row * tile_size))
+            tile = Image.open(path).convert('RGB').resize(
+                (tile_size, tile_size), Image.NEAREST)
+            canvas.paste(tile, (paste_x, paste_y))
         except Exception:
             pass
 
@@ -424,16 +539,68 @@ class StatusBar(tk.Frame):
 #  WORLD MAP TAB
 # ═══════════════════════════════════════════════════════════════════════════════
 
+# Zone → name mapping based on diagnostic scan of actual tile data.
+# Zones confirmed present: 0,2-5,30-32,36-37,39,41,44-46,48-49,51-58,73,83,100-102,205
+# Zones 6-29 (except present ones) and gaps are simply absent from game data.
+# Town/OrcCamp interiors have NO automap tiles (too small; developers didn't generate them).
 ZONE_NAMES = {
-    0:  "Ahkuilon (Main World)",
-    2:  "Dungeon Zone 2",
-    3:  "Interior Zone 3",
-    4:  "Interior Zone 4",
-    5:  "Interior Zone 5",
+    # ── Ahkuilon outdoor world ────────────────────────────────────────────────
+    0:   "Main World (Ahkuilon)",
+    # ── Interior zones (confirmed tile data) ─────────────────────────────────
+    2:   "Zone 2",
+    3:   "Zone 3",
+    4:   "Zone 4",
+    5:   "Zone 5",
+    # ── Dungeon / Keep zones (30-58 range) ───────────────────────────────────
+    30:  "Zone 30",
+    31:  "Zone 31",
+    32:  "Zone 32",
+    36:  "Zone 36",
+    37:  "Zone 37",
+    39:  "Zone 39",
+    41:  "Zone 41",
+    44:  "Zone 44",
+    45:  "Zone 45",
+    46:  "Zone 46",
+    48:  "Zone 48",
+    49:  "Zone 49",
+    51:  "Zone 51",
+    52:  "Zone 52",
+    53:  "Zone 53",
+    54:  "Zone 54",
+    55:  "Zone 55",
+    56:  "Zone 56",
+    57:  "Zone 57",
+    58:  "Zone 58",
+    # ── Large zones ───────────────────────────────────────────────────────────
+    73:  "Zone 73",
+    83:  "Zone 83",
+    100: "Zone 100",
+    101: "Zone 101",
+    102: "Zone 102",
+    205: "Zone 205",
 }
-for _z in range(30, 60):
-    ZONE_NAMES.setdefault(_z, f"Zone {_z}")
 
+
+def _get_unextracted_modules() -> List[str]:
+    """Return stems of .rvm module files that exist but haven't been extracted yet."""
+    unextracted = []
+    modules_dir = GAME_DIR / "Modules"
+    if not modules_dir.exists():
+        candidates = list(GAME_DIR.glob("*.rvm"))
+    else:
+        candidates = list(modules_dir.glob("*.rvm")) + list(GAME_DIR.glob("*.rvm"))
+    for rvm in candidates:
+        stem = rvm.stem
+        out_dir = EXTRACT_DIR / stem
+        if not out_dir.exists() or not any(out_dir.rglob("*")):
+            unextracted.append(stem)
+    return sorted(unextracted)
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+#  WORLD MAP TAB
+# ═══════════════════════════════════════════════════════════════════════════════
 
 class WorldMapTab(tk.Frame):
     def __init__(self, parent, status: StatusBar):
@@ -443,7 +610,7 @@ class WorldMapTab(tk.Frame):
         self._img     = None
         self._zoom    = 1.0
         self._zones   = []
-        self._cur_zone = tk.IntVar(value=0)
+        self._cur_zone = tk.StringVar(value="")
         self._cache    = {}      # zone -> PIL Image
         self._build_ui()
         self.after(100, self._init_load)
@@ -466,6 +633,28 @@ class WorldMapTab(tk.Frame):
                   bg=ACCENT, fg="white", relief="flat",
                   font=("Segoe UI", 10, "bold"), padx=10
                   ).pack(side="left", padx=8)
+
+        tk.Button(bar, text="Save PNG", command=self._save_current,
+                  bg=ACCENT2, fg="white", relief="flat",
+                  font=("Segoe UI", 10, "bold"), padx=10
+                  ).pack(side="left", padx=4)
+
+        self._export_all_btn = tk.Button(
+                  bar, text="Export All Zones", command=self._export_all_zones,
+                  bg="#2a6040", fg="white", relief="flat",
+                  font=("Segoe UI", 10, "bold"), padx=10)
+        self._export_all_btn.pack(side="left", padx=4)
+
+        self._extract_btn = tk.Button(
+                  bar, text="⬇ Extract Modules", command=self._extract_missing_modules,
+                  bg="#5a3070", fg="white", relief="flat",
+                  font=("Segoe UI", 10, "bold"), padx=10)
+        self._extract_btn.pack(side="left", padx=4)
+
+        tk.Button(bar, text="🔍 Diagnose", command=self._show_diagnose,
+                  bg="#304050", fg="white", relief="flat",
+                  font=("Segoe UI", 10, "bold"), padx=10
+                  ).pack(side="left", padx=4)
 
         # Zoom controls
         tk.Label(bar, text="Zoom:", bg=BG_DARK, fg=FG_DIM,
@@ -515,73 +704,304 @@ class WorldMapTab(tk.Frame):
         self._refresh_display()
 
     def _init_load(self):
-        self._zones = get_available_zones()
+        # _zones now stores ZoneKey = (module_name, zone_number) tuples
+        self._zones = get_all_zone_keys()
+
+        # Count unextracted modules so we can prompt the user
+        unextracted = _get_unextracted_modules()
+        if unextracted:
+            hint = f"  ({len(unextracted)} unextracted module(s): {', '.join(unextracted[:4])}{'…' if len(unextracted)>4 else ''}  — click ⬇ Extract Modules)"
+        else:
+            hint = ""
+
         if not self._zones:
-            self._status.set("No automap tiles found in _extracted/Ahkuilon/Automaps/")
+            self._status.set(
+                "No automap tiles found. Run archive_extractor.py first, then restart." + hint)
             return
 
-        labels = [f"{z}  —  {ZONE_NAMES.get(z, f'Zone {z}')}" for z in self._zones]
+        def _label(mk: ZoneKey) -> str:
+            module, z = mk
+            name = ZONE_NAMES.get(z, f"Zone {z}")
+            if module.lower() == "ahkuilon":
+                return f"Zone {z}  —  {name}"
+            return f"Zone {z}  —  {module}  ({name})"
+
+        labels = [_label(mk) for mk in self._zones]
         self._zone_combo['values'] = labels
         self._zone_combo.current(0)
 
-        # Check for pre-rendered zone 0
-        cached_path = RENDERS_DIR / "world_map_zone0.png"
+        modules_found = len(set(m for m, _ in self._zones))
+        status_extra = f"  |  {hint.strip()}" if hint else ""
+        self._status.set(
+            f"{len(self._zones)} zone(s) across {modules_found} module(s) found{status_extra}")
+
+        # Check for pre-rendered zone 0 (main world module)
+        main_module = next((m for m, z in self._zones if m.lower() == "ahkuilon" and z == 0),
+                           self._zones[0][0] if self._zones else "ahkuilon")
+        cached_path = RENDERS_DIR / f"world_map_{main_module}_zone0.png"
+        if not cached_path.exists():
+            cached_path = RENDERS_DIR / "world_map_zone0.png"   # legacy name
         if cached_path.exists() and HAS_PIL:
-            self._status.set("Loading pre-rendered world map...")
             img = Image.open(cached_path)
-            self._cache[0] = img
+            self._cache[(main_module, 0)] = img
             self._img = img
             self._zoom = 0.25
             self._refresh_display()
-            tiles = get_automap_tiles(0)
+            tiles = get_automap_tiles(0, main_module)
             self._tile_lbl.config(
-                text=f"Zone 0: {len(tiles)} tiles  |  {img.width}x{img.height}px")
-            self._status.set(
-                f"World Map loaded — {len(tiles)} tiles stitched into "
-                f"{img.width}x{img.height}px")
+                text=f"{main_module} Zone 0: {len(tiles)} tiles  |  {img.width}x{img.height}px")
         else:
             self._stitch_current()
 
-    def _on_zone_change(self, _=None):
-        idx = self._zone_combo.current()
-        if 0 <= idx < len(self._zones):
-            z = self._zones[idx]
-            self._cur_zone.set(z)
-            if z in self._cache:
-                self._img  = self._cache[z]
-                self._zoom = 0.25
-                self._refresh_display()
-                self._tile_lbl.config(
-                    text=f"Zone {z}: {self._img.width}x{self._img.height}px (cached)")
-            else:
-                self._stitch_current()
+    def _extract_missing_modules(self):
+        """Extract any .rvm module files that haven't been extracted yet."""
+        unextracted = _get_unextracted_modules()
+        if not unextracted:
+            self._status.set("All modules already extracted.")
+            return
 
-    def _stitch_current(self):
-        idx = self._zone_combo.current()
-        zone = self._zones[idx] if 0 <= idx < len(self._zones) else 0
-        self._status.set(f"Stitching zone {zone}...")
+        self._extract_btn.config(state="disabled", text="Extracting…")
+        self._status.set(f"Extracting {len(unextracted)} module(s): {', '.join(unextracted)}…")
 
         def _worker():
-            img = stitch_zone_map(zone)
-            self.after(0, lambda: self._on_stitch_done(zone, img))
+            import zipfile as _zf
+            done = []
+            failed = []
+            for stem in unextracted:
+                # Try both Modules/ subdir and game root
+                candidates = [
+                    GAME_DIR / "Modules" / f"{stem}.rvm",
+                    GAME_DIR / f"{stem}.rvm",
+                ]
+                src = next((p for p in candidates if p.exists()), None)
+                if src is None:
+                    failed.append(stem)
+                    continue
+                out_dir = EXTRACT_DIR / stem
+                try:
+                    out_dir.mkdir(parents=True, exist_ok=True)
+                    with _zf.ZipFile(src) as zf:
+                        zf.extractall(out_dir)
+                    done.append(stem)
+                except Exception as e:
+                    failed.append(f"{stem}({e})")
+            self.after(0, self._on_extract_done, done, failed)
 
         threading.Thread(target=_worker, daemon=True).start()
 
-    def _on_stitch_done(self, zone: int, img):
+    def _on_extract_done(self, done, failed):
+        self._extract_btn.config(state="normal", text="⬇ Extract Modules")
+        if done:
+            self._status.set(
+                f"Extracted: {', '.join(done)}. Reloading zones…")
+            # Reload the zone list now that new modules are available
+            self._zones = get_all_zone_keys()
+
+            def _label(mk: ZoneKey) -> str:
+                module, z = mk
+                name = ZONE_NAMES.get(z, f"Zone {z}")
+                if module.lower() == "ahkuilon":
+                    return f"Zone {z}  —  {name}"
+                return f"Zone {z}  —  {module}  ({name})"
+
+            self._zone_combo['values'] = [_label(mk) for mk in self._zones]
+            if self._zones:
+                self._zone_combo.current(0)
+            msg = f"Extracted {len(done)} module(s). {len(self._zones)} zones now available."
+            if failed:
+                msg += f"  Failed: {', '.join(failed)}"
+            self._status.set(msg)
+        else:
+            self._status.set(
+                f"Extraction failed — .rvm files not found in {GAME_DIR}/Modules/. "
+                f"Failed: {', '.join(failed)}")
+
+
+    def _current_zone_key(self) -> ZoneKey:
+        """Return the (module, zone) key for the currently selected combobox entry."""
+        idx = self._zone_combo.current()
+        if 0 <= idx < len(self._zones):
+            return self._zones[idx]
+        return self._zones[0] if self._zones else ("ahkuilon", 0)
+
+    def _on_zone_change(self, _=None):
+        mk = self._current_zone_key()
+        if mk in self._cache:
+            self._img  = self._cache[mk]
+            self._zoom = 0.25
+            self._refresh_display()
+            module, z = mk
+            self._tile_lbl.config(
+                text=f"{module} Zone {z}: {self._img.width}x{self._img.height}px (cached)")
+        else:
+            self._stitch_current()
+
+    def _stitch_current(self):
+        mk = self._current_zone_key()
+        module, zone = mk
+        self._status.set(f"Stitching {module} zone {zone}...")
+
+        def _worker():
+            img = stitch_zone_map(zone, module)
+            self.after(0, lambda: self._on_stitch_done(mk, img))
+
+        threading.Thread(target=_worker, daemon=True).start()
+
+    def _on_stitch_done(self, mk: ZoneKey, img):
+        module, zone = mk
         if img is None:
-            self._status.set(f"No tiles found for zone {zone}")
+            self._status.set(f"No tiles found for {module} zone {zone}  (check Diagnose for tile counts)")
             return
-        self._cache[zone] = img
+        self._cache[mk] = img
         self._img   = img
         self._zoom  = 0.25
         self._refresh_display()
-        tiles = get_automap_tiles(zone)
+        tiles = get_automap_tiles(zone, module)
         self._tile_lbl.config(
-            text=f"Zone {zone}: {len(tiles)} tiles  |  {img.width}x{img.height}px")
+            text=f"{module} Zone {zone}: {len(tiles)} tiles  |  {img.width}x{img.height}px")
         self._status.set(
-            f"Zone {zone} stitched — {len(tiles)} tiles, {img.width}x{img.height}px")
+            f"{module} zone {zone} stitched — {len(tiles)} tiles, {img.width}x{img.height}px")
 
-    def _set_zoom(self, z: float):
+    def _save_current(self):
+        """Save the currently displayed zone map as a PNG."""
+        if self._img is None:
+            self._status.set("Nothing to save — stitch a zone first.")
+            return
+        module, zone = self._current_zone_key()
+        RENDERS_DIR.mkdir(parents=True, exist_ok=True)
+        out = RENDERS_DIR / f"world_map_{module}_zone{zone}.png"
+        self._img.save(out)
+        self._status.set(f"Saved: {out}")
+
+    def _export_all_zones(self):
+        """Stitch and save every available zone to PNG in the renders folder."""
+        if not self._zones:
+            self._status.set("No zones found.")
+            return
+        self._export_all_btn.config(state="disabled", text="Exporting…")
+        total = len(self._zones)
+        self._status.set(f"Exporting {total} zones…")
+
+        def _worker():
+            RENDERS_DIR.mkdir(parents=True, exist_ok=True)
+            for done, mk in enumerate(self._zones):
+                module, z = mk
+                self.after(0, lambda m=module, z=z, d=done: self._status.set(
+                    f"Stitching {m} zone {z}… ({d}/{total})"))
+                img = stitch_zone_map(z, module)
+                if img:
+                    out = RENDERS_DIR / f"world_map_{module}_zone{z}.png"
+                    img.save(out)
+                    self._cache[mk] = img
+            self.after(0, self._on_export_all_done, total)
+
+        threading.Thread(target=_worker, daemon=True).start()
+
+    def _on_export_all_done(self, count: int):
+        self._export_all_btn.config(state="normal", text="Export All Zones")
+        self._status.set(
+            f"Export complete — {count} zone maps saved to {RENDERS_DIR}")
+
+    def _show_diagnose(self):
+        """Show a popup with full Automaps directory diagnostic info."""
+        win = tk.Toplevel(self)
+        win.title("Automap Diagnostic")
+        win.configure(bg=BG_DARK)
+        win.geometry("700x540")
+
+        tk.Label(win, text="AUTOMAP DIAGNOSTIC", bg=BG_DARK, fg=ACCENT,
+                 font=("Segoe UI", 12, "bold")).pack(anchor="w", padx=14, pady=(12, 4))
+
+        txt = tk.Text(win, bg="#0c0c14", fg=FG_TEXT, font=("Consolas", 9),
+                      relief="flat", wrap="none")
+        sb_y = ttk.Scrollbar(win, orient="vertical",   command=txt.yview)
+        sb_x = ttk.Scrollbar(win, orient="horizontal", command=txt.xview)
+        txt.configure(yscrollcommand=sb_y.set, xscrollcommand=sb_x.set)
+        sb_x.pack(side="bottom", fill="x")
+        sb_y.pack(side="right",  fill="y")
+        txt.pack(fill="both", expand=True, padx=8, pady=(0, 8))
+
+        txt.tag_configure("h",    foreground=ACCENT,  font=("Segoe UI", 9, "bold"))
+        txt.tag_configure("ok",   foreground="#80e080")
+        txt.tag_configure("warn", foreground="#e0c060")
+        txt.tag_configure("dim",  foreground=FG_DIM)
+
+        def w(line, tag=""):
+            txt.insert("end", line + "\n", tag)
+
+        w(f"EXTRACT_DIR : {EXTRACT_DIR}", "dim")
+        w(f"GAME_DIR    : {GAME_DIR}", "dim")
+        w("")
+
+        # --- Module directories ---
+        w("MODULE DIRS WITH Automaps/", "h")
+        amap_dirs = _all_automap_dirs()
+        if amap_dirs:
+            for d in amap_dirs:
+                bmps = list(d.rglob("*.bmp"))
+                w(f"  ✓ {d}  ({len(bmps)} bmp files)", "ok")
+        else:
+            w("  NONE FOUND", "warn")
+        w("")
+
+        # --- Unextracted modules ---
+        unext = _get_unextracted_modules()
+        w("UNEXTRACTED .rvm MODULES", "h")
+        if unext:
+            for m in unext:
+                w(f"  ! {m}  ← click '⬇ Extract Modules' to extract", "warn")
+        else:
+            w("  All found modules are extracted", "ok")
+        w("")
+
+        # --- All bmp files found ---
+        w("ALL BMP FILES FOUND (rglob)", "h")
+        all_bmps: List[Path] = []
+        for d in amap_dirs:
+            all_bmps.extend(d.rglob("*.bmp"))
+        all_bmps.sort()
+        w(f"  Total: {len(all_bmps)}")
+
+        zone_counts: dict = {}
+        bad: List[str] = []
+        for f in all_bmps:
+            parts = f.stem.split('_')
+            if len(parts) == 3:
+                try:
+                    z = int(parts[0])
+                    zone_counts[z] = zone_counts.get(z, 0) + 1
+                    continue
+                except ValueError:
+                    pass
+            bad.append(f.name)
+
+        w("")
+        w("ZONE TILE COUNTS", "h")
+        for z in sorted(zone_counts):
+            w(f"  Zone {z:4d} : {zone_counts[z]:5d} tiles", "ok")
+
+        if bad:
+            w("")
+            w(f"UNPARSEABLE FILENAMES ({len(bad)})", "h")
+            for b in bad[:20]:
+                w(f"  {b}", "warn")
+            if len(bad) > 20:
+                w(f"  … and {len(bad)-20} more", "dim")
+
+        # --- Modules folder contents ---
+        w("")
+        w("MODULES FOLDER CONTENTS", "h")
+        mdir = GAME_DIR / "Modules"
+        if mdir.exists():
+            for f in sorted(mdir.iterdir()):
+                w(f"  {f.name}  ({f.stat().st_size // 1024} KB)", "ok")
+        else:
+            w(f"  {mdir}  — NOT FOUND", "warn")
+            w("  (town/orc-camp automaps live in Modules/*.rvm)", "dim")
+
+        txt.configure(state="disabled")
+
+
         self._zoom = z
         self._refresh_display()
 
@@ -698,7 +1118,7 @@ class CharacterGalleryTab(tk.Frame):
                                       bg=BG_PANEL, fg=FG_TEXT,
                                       font=("Segoe UI", 14, "bold"),
                                       wraplength=240, justify="left")
-        self._detail_name.pack(anchor="w", pady=(0, 8))
+        self._detail_name.pack(anchor="w", pady=(0, 4))
 
         self._detail_portrait = tk.Label(right, bg=BG_PANEL)
         self._detail_portrait.pack(anchor="w", pady=4)
@@ -706,14 +1126,34 @@ class CharacterGalleryTab(tk.Frame):
         self._detail_text = tk.Text(right, bg=BG_PANEL, fg=FG_TEXT,
                                      font=("Consolas", 9),
                                      relief="flat", wrap="word",
-                                     state="disabled", height=28)
+                                     state="disabled", height=32,
+                                     cursor="arrow")
+        sb = ttk.Scrollbar(right, orient="vertical",
+                            command=self._detail_text.yview)
+        self._detail_text.configure(yscrollcommand=sb.set)
+        sb.pack(side="right", fill="y", pady=(8, 0))
         self._detail_text.pack(fill="both", expand=True, pady=(8, 0))
 
-        # Configure text tags
-        self._detail_text.tag_configure("h",  foreground=ACCENT,  font=("Segoe UI", 9, "bold"))
-        self._detail_text.tag_configure("v",  foreground=FG_TEXT, font=("Consolas", 9))
-        self._detail_text.tag_configure("kv", foreground=ACCENT2, font=("Segoe UI", 9))
-        self._detail_text.tag_configure("dim",foreground=FG_DIM,  font=("Segoe UI", 8))
+        # Text tags
+        self._detail_text.tag_configure("h",    foreground=ACCENT,
+                                                 font=("Segoe UI", 9, "bold"))
+        self._detail_text.tag_configure("v",    foreground=FG_TEXT,
+                                                 font=("Consolas", 9))
+        self._detail_text.tag_configure("kv",   foreground=ACCENT2,
+                                                 font=("Segoe UI", 9))
+        self._detail_text.tag_configure("dim",  foreground=FG_DIM,
+                                                 font=("Segoe UI", 8))
+        self._detail_text.tag_configure("link", foreground="#6ab0f5",
+                                                 font=("Segoe UI", 8),
+                                                 underline=True)
+        self._detail_text.tag_configure("good", foreground="#80e080",
+                                                 font=("Consolas", 9))
+        self._detail_text.tag_configure("warn", foreground="#e0c060",
+                                                 font=("Consolas", 9))
+        self._detail_text.tag_configure("anim", foreground="#c080ff",
+                                                 font=("Consolas", 9))
+        self._detail_text.tag_configure("raw",  foreground="#607060",
+                                                 font=("Consolas", 8))
 
     def _load_all(self):
         self._status.set("Parsing char.def...")
@@ -764,7 +1204,8 @@ class CharacterGalleryTab(tk.Frame):
             filtered = [c for c in self._chars
                         if flt in c["name"].lower()
                         or flt in c.get("class", "").lower()
-                        or flt in c.get("groups", "").lower()]
+                        or flt in c.get("groups", "").lower()
+                        or flt in c.get("script", "").lower()]
         self._render_gallery(filtered)
         self._count_lbl.config(text=f"{len(filtered)} / {len(self._chars)}")
 
@@ -772,49 +1213,218 @@ class CharacterGalleryTab(tk.Frame):
         name = char["name"]
         self._detail_name.config(text=name)
 
-        # Portrait
-        photo = self._photos.get(name)
-        if photo:
-            self._detail_portrait.config(image=photo)
-            self._detail_portrait._photo = photo
+        # Portrait (larger in detail pane)
+        portrait_path = find_portrait(name)
+        if portrait_path and HAS_PIL:
+            try:
+                img = Image.open(portrait_path).convert("RGB").resize(
+                    (128, 128), Image.LANCZOS)
+                photo = ImageTk.PhotoImage(img)
+                self._detail_portrait.config(image=photo, text="")
+                self._detail_portrait._photo = photo
+            except Exception:
+                self._detail_portrait.config(image="", text="")
         else:
-            self._detail_portrait.config(image="", text="")
+            photo = self._photos.get(name)
+            if photo:
+                self._detail_portrait.config(image=photo, text="")
+                self._detail_portrait._photo = photo
+            else:
+                self._detail_portrait.config(image="", text="")
 
-        # i3d info
-        i3d_path = find_char_i3d(name)
-        anim_count = 0
-        i3d_name = "not found"
-        if i3d_path:
-            i3d_name   = i3d_path.name
-            anim_count = parse_i3d_anim_count(i3d_path)
+        # i3d / animation info
+        i3d_path    = find_char_i3d(name)
+        anim_states = parse_i3d_anim_states(i3d_path) if i3d_path else []
 
-        # Build detail text
         txt = self._detail_text
         txt.configure(state="normal")
         txt.delete("1.0", "end")
 
-        def row(label, value, tag="v"):
-            txt.insert("end", f"  {label:<18}", "kv")
-            txt.insert("end", f"{value}\n", tag)
+        # Bind tag so clicking a "link" opens Explorer/Finder
+        txt.tag_unbind("link", "<Button-1>")
 
+        def row(label, value, vtag="v"):
+            txt.insert("end", f"  {label:<16}", "kv")
+            txt.insert("end", f"{value or '—'}\n", vtag)
+
+        def file_row(label, path: Optional[Path]):
+            txt.insert("end", f"  {label:<16}", "kv")
+            if path and path.exists():
+                display = path.name
+                start   = txt.index("end-1c")
+                txt.insert("end", display, "link")
+                end = txt.index("end-1c")
+                tag = f"link_{path}"
+                txt.tag_add(tag, start, end)
+                txt.tag_configure(tag, foreground="#6ab0f5", underline=True)
+                txt.tag_bind(tag, "<Button-1>",
+                             lambda e, p=path: self._open_path(p))
+                txt.tag_bind(tag, "<Enter>",
+                             lambda e: txt.config(cursor="hand2"))
+                txt.tag_bind(tag, "<Leave>",
+                             lambda e: txt.config(cursor="arrow"))
+                txt.insert("end", "\n")
+            else:
+                txt.insert("end", "not found\n", "dim")
+
+        # ── IDENTITY ─────────────────────────────────────────────────────────
         txt.insert("end", "IDENTITY\n", "h")
-        row("Name",       name)
-        row("Class",      char.get("class", "—") or "—")
-        row("Group",      char.get("groups", "—") or "—")
+        row("Name",    name)
+        row("Class",   char.get("class"))
+        row("Groups",  char.get("groups"))
+        row("Enemies", char.get("enemies"))
+        if char.get("script"):
+            row("Script",  char.get("script"))
 
+        # ── FILES ────────────────────────────────────────────────────────────
+        txt.insert("end", "\nFILES\n", "h")
+        file_row("Portrait",   portrait_path)
+        file_row("3D Model",   i3d_path)
+        if CHAR_DEF.exists():
+            file_row("char.def",   CHAR_DEF)
+
+        # ── COMBAT ───────────────────────────────────────────────────────────
         txt.insert("end", "\nCOMBAT\n", "h")
-        row("Enemies",    char.get("enemies", "—") or "—")
-        row("Block %",    f"{char.get('block_pct',0)}%")
-        row("Weapon DMG", str(char.get("weapon_dmg",0)))
-        row("Sight range",str(char.get("sight", 0)))
-        row("Attacks",    str(char.get("attack_count", 0)))
-        row("Impacts",    str(char.get("impact_count", 0)))
+        row("Health",     str(char.get("health", 0)) if char.get("health") else "—")
+        row("Speed",      str(char.get("speed",  0)) if char.get("speed")  else "—")
+        row("Block %",    f"{char.get('block_pct', 0)}%")
+        row("Weapon DMG", str(char.get("weapon_dmg", 0)))
+        row("Sight",      str(char.get("sight", 0)))
 
+        # Attacks
+        attacks = char.get("attacks", [])
+        if attacks:
+            txt.insert("end", f"\nATTACKS  ({len(attacks)})\n", "h")
+            for atk in attacks:
+                aname = atk.get("name", "?")
+                dmg   = atk.get("damage", "")
+                anim  = atk.get("anim", "")
+                txt.insert("end", f"  • {aname}", "v")
+                if dmg:
+                    txt.insert("end", f"  dmg:{dmg}", "warn")
+                if anim:
+                    txt.insert("end", f"  [{anim}]", "anim")
+                txt.insert("end", "\n")
+        elif char.get("attack_count", 0):
+            row("Attacks", str(char["attack_count"]))
+
+        # Impacts
+        impacts = char.get("impacts", [])
+        if impacts:
+            txt.insert("end", f"\nIMPACTS  ({len(impacts)})\n", "h")
+            for imp in impacts:
+                txt.insert("end", f"  • {imp.get('name','?')}\n", "v")
+        elif char.get("impact_count", 0):
+            row("Impacts", str(char["impact_count"]))
+
+        # Spells
+        spells = char.get("spells", [])
+        if spells:
+            txt.insert("end", f"\nSPELLS  ({len(spells)})\n", "h")
+            for sp in spells:
+                txt.insert("end", f"  • {sp}\n", "good")
+
+        # ── 3D MODEL / ANIMATIONS ────────────────────────────────────────────
         txt.insert("end", "\n3D MODEL\n", "h")
-        row("File",       i3d_name)
-        row("Anim states",str(anim_count))
+        if i3d_path:
+            row("File",   i3d_path.name)
+            row("Size",   f"{i3d_path.stat().st_size // 1024} KB")
+            if anim_states:
+                txt.insert("end", f"\nANIMATION STATES  ({len(anim_states)})\n", "h")
+                for st in anim_states:
+                    sname  = st["name"]
+                    frames = st["frames"]
+                    w, h   = st.get("width", 0), st.get("height", 0)
+                    txt.insert("end", f"  {sname:<14}", "anim")
+                    txt.insert("end", f"  {frames} frame{'s' if frames!=1 else ''}", "v")
+                    if w and h:
+                        txt.insert("end", f"  ({w}×{h})", "dim")
+                    txt.insert("end", "\n")
+
+                # Show which states char.def references
+                anim_refs = char.get("anim_refs", [])
+                if anim_refs:
+                    known   = {st["name"] for st in anim_states}
+                    txt.insert("end", f"\nANIM REFS IN char.def\n", "h")
+                    for ref in anim_refs:
+                        found = ref in known
+                        txt.insert("end", f"  {'✓' if found else '?'} {ref}\n",
+                                   "good" if found else "warn")
+            else:
+                row("Anim states", "0 (header unreadable)")
+        else:
+            txt.insert("end", "  No .i3d file found for this character.\n", "dim")
+            txt.insert("end", "  Expected in:\n", "dim")
+            txt.insert("end", f"  {IMAGERY_ASSETS / 'Chars'}\n", "dim")
+
+        # ── RAW char.def BLOCK ───────────────────────────────────────────────
+        raw_body = char.get("_raw", "")
+        if raw_body:
+            txt.insert("end", "\n▼ RAW char.def  (click to expand)\n", "h")
+            # Collapsed by default — show first 3 lines
+            lines = raw_body.splitlines()
+            preview = "\n".join(f"  {l}" for l in lines[:3])
+            if len(lines) > 3:
+                preview += f"\n  … ({len(lines)-3} more lines)"
+            txt.insert("end", preview + "\n", "raw")
+
+            # Tag to expand/collapse
+            raw_start = txt.index("end-1c linestart")
+            full_raw  = "\n".join(f"  {l}" for l in lines) + "\n"
+            self._raw_expanded = getattr(self, "_raw_expanded", {})
+            self._raw_expanded[name] = False
+
+            def _toggle_raw(e, n=name, full=full_raw, preview_text=preview+"\n"):
+                expanded = self._raw_expanded.get(n, False)
+                txt.configure(state="normal")
+                # Find the raw block
+                idx = txt.search("▼ RAW char.def", "1.0")
+                if not idx:
+                    txt.configure(state="disabled")
+                    return
+                block_start = txt.index(f"{idx} +1 line")
+                block_end   = txt.index(f"{block_start} lineend +1c")
+                # Count lines in current raw section
+                cur = txt.get(block_start, "end")
+                if not expanded:
+                    # Expand: replace preview with full
+                    txt.delete(block_start, "end")
+                    txt.insert(block_start, full, "raw")
+                    self._raw_expanded[n] = True
+                else:
+                    txt.delete(block_start, "end")
+                    txt.insert(block_start, preview_text, "raw")
+                    self._raw_expanded[n] = False
+                txt.configure(state="disabled")
+
+            # Bind the header line
+            h_start = txt.search("▼ RAW char.def", "1.0")
+            if h_start:
+                h_end = f"{h_start} lineend"
+                txt.tag_add("raw_toggle", h_start, h_end)
+                txt.tag_configure("raw_toggle", foreground=ACCENT,
+                                   font=("Segoe UI", 9, "bold"), underline=True)
+                txt.tag_bind("raw_toggle", "<Button-1>", _toggle_raw)
+                txt.tag_bind("raw_toggle", "<Enter>",
+                             lambda e: txt.config(cursor="hand2"))
+                txt.tag_bind("raw_toggle", "<Leave>",
+                             lambda e: txt.config(cursor="arrow"))
 
         txt.configure(state="disabled")
+
+    def _open_path(self, path: Path):
+        """Open a file or its parent folder in the OS file manager."""
+        import subprocess, sys
+        try:
+            target = path if path.is_dir() else path.parent
+            if sys.platform == "win32":
+                subprocess.Popen(["explorer", str(target)])
+            elif sys.platform == "darwin":
+                subprocess.Popen(["open", str(target)])
+            else:
+                subprocess.Popen(["xdg-open", str(target)])
+        except Exception:
+            pass
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -1424,39 +2034,40 @@ class ScriptsTab(tk.Frame):
 
 class ModelViewer3D(tk.Frame):
     """
-    Solid flat-shaded viewer for i3d geometry with back-face culling.
-
-    Rendering pipeline:
-      1. Rotate all vertices by azimuth (Y-axis) then elevation (X-axis).
-      2. Project to 2-D canvas with orthographic projection.
-      3. For each face: compute view-space face normal via cross product.
-         Back-face cull (dot with view direction < 0).
-      4. Painter's algorithm: sort surviving faces back-to-front by avg Z.
-      5. Flat shade each face: diffuse = dot(face_normal, light_dir) clamped
-         to [0, 1]; ambient floor of 0.25 so dark sides are still visible.
-      6. Draw filled polygon + thin edge for crispness.
+    Orthographic 3D viewer for i3d geometry.
+    Supports flat-shaded and UV-textured rendering modes.
+    Drag to rotate, scroll wheel to zoom.
     Falls back to a point cloud when no face data is available.
     """
 
-    # Base body colour in RGB (D3D-blue steel)
-    _BASE_R = 0x2A
-    _BASE_G = 0x55
-    _BASE_B = 0x8F
-
-    # Edge overlay colour
-    _EDGE_COL  = "#1a2d50"
-
     def __init__(self, parent, **kwargs):
         super().__init__(parent, bg=BG_DARK, **kwargs)
-        self._verts  : List[tuple] = []
-        self._faces  : List[tuple] = []
-        self._az     = 0.4    # azimuth  (radians, rotation around Y)
-        self._el     = 0.25   # elevation (radians, rotation around X)
+        self._verts   : List[tuple] = []
+        self._faces   : List[tuple] = []
+        self._normals : List[tuple] = []
+        self._uvs     : List[tuple] = []
+        self._texture  = None          # PIL.Image or None
+        self._photo_ref = None         # keep ImageTk.PhotoImage alive
+        self._az     = 0.5
+        self._el     = 0.1
         self._zoom   = 1.0
-        self._drag   = None   # (x, y, az0, el0) drag start state
+        self._drag   = None
+        self._mode_var = tk.StringVar(value="shaded")
         self._build()
 
     def _build(self):
+        # ── Top toolbar ───────────────────────────────────────────────────────
+        toolbar = tk.Frame(self, bg=BG_DARK)
+        toolbar.pack(fill="x", side="top")
+
+        tk.Label(toolbar, text="Render:", bg=BG_DARK, fg=FG_DIM,
+                 font=("Segoe UI", 8)).pack(side="left", padx=(6, 2))
+        for label, val in [("Shaded", "shaded"), ("Textured", "textured")]:
+            tk.Radiobutton(toolbar, text=label, variable=self._mode_var, value=val,
+                           bg=BG_DARK, fg=FG_TEXT, selectcolor=BG_PANEL,
+                           activebackground=BG_DARK, font=("Segoe UI", 8),
+                           command=self._redraw).pack(side="left", padx=2)
+
         self._canvas = tk.Canvas(self, bg="#07070f", highlightthickness=0,
                                  cursor="fleur")
         self._canvas.pack(fill="both", expand=True)
@@ -1471,14 +2082,57 @@ class ModelViewer3D(tk.Frame):
         self._canvas.bind("<MouseWheel>",      self._on_wheel)
         self._canvas.bind("<Configure>",       lambda e: self._redraw())
 
-    def load(self, verts: list, faces: list, info: str = ""):
-        self._verts  = verts
-        self._faces  = faces
-        self._az     = 0.4
-        self._el     = 0.25
+    def load(self, verts: list, faces: list, info: str = "",
+             normals: list = None, uvs: list = None, texture=None):
+        self._verts   = verts
+        self._faces   = faces
+        self._normals = normals or []
+        self._uvs     = uvs or []
+        if texture is not None:
+            self._texture = texture
+        self._photo_ref = None
+        self._az     = 0.5
+        self._el     = 0.1
         self._zoom   = 1.0
         self._info_lbl.config(text=info or ("No geometry" if not verts else ""))
         self._redraw()
+
+    def reload(self, verts: list, faces: list, info: str = "",
+               normals: list = None, uvs: list = None):
+        """Like load() but preserves current rotation/zoom and texture."""
+        self._verts   = verts
+        self._faces   = faces
+        self._normals = normals or []
+        self._uvs     = uvs or []
+        self._photo_ref = None
+        self._info_lbl.config(text=info or ("No geometry" if not verts else ""))
+        self._redraw()
+
+    @staticmethod
+    def load_texture_for(i3d_path) -> "Optional[object]":
+        """
+        Load a texture for an .i3d file.
+        Priority:
+          1. Sidecar file (.bmp/.png/.tga alongside the .i3d)
+          2. Embedded DirectDraw texture extracted from the .i3d itself
+        Returns PIL Image (RGBA) or None.
+        """
+        try:
+            from PIL import Image as _Image
+            p = Path(i3d_path)
+            for ext in (".bmp", ".BMP", ".png", ".PNG", ".tga", ".TGA"):
+                candidate = p.with_suffix(ext)
+                if candidate.exists():
+                    return _Image.open(candidate).convert("RGBA")
+        except Exception:
+            pass
+        # Fall back to embedded texture in the .i3d file
+        try:
+            from decoders.i3d import decode_i3d_texture
+            return decode_i3d_texture(Path(i3d_path))
+        except Exception:
+            pass
+        return None
 
     def _drag_start(self, e):
         self._drag = (e.x, e.y, self._az, self._el)
@@ -1495,40 +2149,14 @@ class ModelViewer3D(tk.Frame):
         self._zoom = max(0.05, min(20.0, self._zoom * (1.1 if e.delta > 0 else 0.9)))
         self._redraw()
 
-    # ── Geometry helpers ───────────────────────────────────────────────────────
-
-    @staticmethod
-    def _cross(a, b):
-        return (a[1]*b[2] - a[2]*b[1],
-                a[2]*b[0] - a[0]*b[2],
-                a[0]*b[1] - a[1]*b[0])
-
-    @staticmethod
-    def _dot(a, b):
-        return a[0]*b[0] + a[1]*b[1] + a[2]*b[2]
-
-    @staticmethod
-    def _sub(a, b):
-        return (a[0]-b[0], a[1]-b[1], a[2]-b[2])
-
-    @staticmethod
-    def _normalize(v):
-        d = math.sqrt(v[0]*v[0] + v[1]*v[1] + v[2]*v[2])
-        if d < 1e-9:
-            return (0.0, 1.0, 0.0)
-        return (v[0]/d, v[1]/d, v[2]/d)
-
-    @staticmethod
-    def _shade_hex(r_base, g_base, b_base, intensity: float) -> str:
-        """Map a [0..1] intensity onto a shaded colour string."""
-        # Ambient + diffuse, gamma-corrected feel via sqrt
-        t = 0.25 + 0.75 * max(0.0, min(1.0, intensity))
-        r = int(r_base * t)
-        g = int(g_base * t)
-        b = int(b_base * t)
-        return f"#{r:02x}{g:02x}{b:02x}"
-
     def _redraw(self):
+        mode = self._mode_var.get()
+        if mode == "textured" and self._texture and self._uvs:
+            self._redraw_textured()
+        else:
+            self._redraw_shaded()
+
+    def _redraw_shaded(self):
         c  = self._canvas
         cw = c.winfo_width()  or 300
         ch = c.winfo_height() or 240
@@ -1539,88 +2167,280 @@ class ModelViewer3D(tk.Frame):
                           fill=FG_MUTED, font=("Segoe UI", 10))
             return
 
-        # ── Step 1: rotate vertices into view space ────────────────────────
+        # ── Centre mesh on bounding-box centroid ───────────────────────────
+        xs_r = [v[0] for v in self._verts]
+        ys_r = [v[1] for v in self._verts]
+        zs_r = [v[2] for v in self._verts]
+        cx_r = (max(xs_r) + min(xs_r)) / 2
+        cy_r = (max(ys_r) + min(ys_r)) / 2
+        cz_r = (max(zs_r) + min(zs_r)) / 2
+
+        # After bind-pose bone transforms, Z is world-up (feet≈z0, head≈z60).
+        # Map Z→up (Y screen), X→horizontal, Y→depth so character stands upright.
+        verts_c = [(x - cx_r, z - cz_r, y - cy_r) for x, y, z in self._verts]
+
+        # ── Stable scale (rotation-invariant, from raw extents) ────────────
+        mesh_span = max(max(xs_r)-min(xs_r), max(ys_r)-min(ys_r),
+                        max(zs_r)-min(zs_r), 1e-6)
+        scale = self._zoom * min(cw, ch) * 0.42 / mesh_span
+
+        # ── Rotate ─────────────────────────────────────────────────────────
+        az, el = self._az, self._el
+        caz, saz = math.cos(az), math.sin(az)
+        cel, sel = math.cos(el), math.sin(el)
+
+        rot = []
+        for x, y, z in verts_c:
+            rx =  x * caz + z * saz
+            ry =  y
+            rz = -x * saz + z * caz
+            rot.append((rx, ry * cel - rz * sel, ry * sel + rz * cel))
+
+        # ── Rotate stored vertex normals (same transform, Z-up swap) ───────
+        has_normals = len(self._normals) == len(self._verts)
+        rot_nrm = []
+        if has_normals:
+            for nx, ny, nz in self._normals:
+                # Match vertex swap: world (nx,ny,nz) → display (nx, nz, ny)
+                nx2, ny2, nz2 = nx, nz, ny
+                rnx =  nx2 * caz + nz2 * saz
+                rny =  ny2
+                rnz = -nx2 * saz + nz2 * caz
+                rot_nrm.append((rnx, rny * cel - rnz * sel, rny * sel + rnz * cel))
+
+        # ── Screen projection ──────────────────────────────────────────────
+        cx2 = cw // 2;  cy2 = ch // 2
+        pts = [(cx2 + v[0] * scale, cy2 - v[1] * scale, v[2]) for v in rot]
+
+        # ── Light ──────────────────────────────────────────────────────────
+        lx, ly, lz = 0.57, 0.74, 0.37   # pre-normalised
+
+        # ── Build face list ────────────────────────────────────────────────
+        if self._faces:
+            face_data = []
+            for face in self._faces:
+                a, b, fi = face
+                if a >= len(pts) or b >= len(pts) or fi >= len(pts):
+                    continue
+                ax, ay, az_ = pts[a]
+                bx, by, bz_ = pts[b]
+                fx, fy, fz_ = pts[fi]
+
+                # Normal: use stored vertex normals (average of 3) when available
+                # — these are always correct regardless of face winding order.
+                # Fall back to computed face normal only if no normals stored.
+                if has_normals:
+                    na = rot_nrm[a]; nb = rot_nrm[b]; nc = rot_nrm[fi]
+                    fnx = (na[0]+nb[0]+nc[0]) / 3
+                    fny = (na[1]+nb[1]+nc[1]) / 3
+                    fnz = (na[2]+nb[2]+nc[2]) / 3
+                    nlen = math.sqrt(fnx*fnx + fny*fny + fnz*fnz) or 1.0
+                    fnx /= nlen; fny /= nlen; fnz /= nlen
+                else:
+                    ra = rot[a]; rb = rot[b]; rc = rot[fi]
+                    e1 = (rb[0]-ra[0], rb[1]-ra[1], rb[2]-ra[2])
+                    e2 = (rc[0]-ra[0], rc[1]-ra[1], rc[2]-ra[2])
+                    fnx = e1[1]*e2[2] - e1[2]*e2[1]
+                    fny = e1[2]*e2[0] - e1[0]*e2[2]
+                    fnz = e1[0]*e2[1] - e1[1]*e2[0]
+                    nlen = math.sqrt(fnx*fnx + fny*fny + fnz*fnz) or 1.0
+                    fnx /= nlen; fny /= nlen; fnz /= nlen
+
+                # fnz > 0 means normal faces toward viewer = front face
+                front = fnz > 0.0
+
+                # Lighting: use abs dot so back faces still shade (not solid black)
+                diff = abs(fnx*lx + fny*ly + fnz*lz)
+                if front:
+                    light = 0.22 + 0.73 * diff
+                else:
+                    light = 0.05 + 0.18 * diff   # back faces much darker
+
+                r_c = int(min(255, 40  + light * 145))
+                g_c = int(min(255, 75  + light * 135))
+                b_c = int(min(255, 130 + light * 105))
+
+                depth = (az_ + bz_ + fz_) / 3
+                face_data.append((front, depth, ax, ay, bx, by, fx, fy,
+                                   f"#{r_c:02x}{g_c:02x}{b_c:02x}"))
+
+            # Two-pass draw: back faces first (no outline), front faces on top
+            # This guarantees front faces are never buried by back faces,
+            # fixing the "crystal / inside-out" artefact caused by mixed winding.
+            back  = sorted((f for f in face_data if not f[0]), key=lambda f:  f[1])
+            front = sorted((f for f in face_data if     f[0]), key=lambda f:  f[1])
+
+            for _, _d, ax, ay, bx, by, fx, fy, fill in back:
+                c.create_polygon(ax, ay, bx, by, fx, fy,
+                                 fill=fill, outline="", width=0)
+            for _, _d, ax, ay, bx, by, fx, fy, fill in front:
+                c.create_polygon(ax, ay, bx, by, fx, fy,
+                                 fill=fill, outline="#1a2a3a", width=1)
+        else:
+            r = max(1, int(scale * 0.05))
+            for px, py, _ in pts:
+                c.create_oval(px-r, py-r, px+r, py+r, fill="#5080d0", outline="")
+
+        c.create_text(6, 6, text="Drag to rotate  ·  Scroll to zoom",
+                      anchor="nw", fill=FG_MUTED, font=("Segoe UI", 8))
+
+    # ─── Textured render (PIL affine-UV software rasterizer) ─────────────────
+
+    def _redraw_textured(self):
+        """
+        Render with proper per-triangle affine UV mapping using PIL.Image.transform.
+        Each triangle gets its own texture patch via the inverse-affine mapping,
+        then is composited onto the framebuffer with a triangular alpha mask.
+        """
+        c  = self._canvas
+        cw = c.winfo_width()  or 300
+        ch = c.winfo_height() or 240
+
+        try:
+            from PIL import Image as PILImage, ImageDraw as PILDraw, ImageEnhance
+        except ImportError:
+            self._redraw_shaded()
+            return
+
+        if not self._verts or not self._faces or not self._texture or not self._uvs:
+            self._redraw_shaded()
+            return
+
+        tex = self._texture.convert("RGB")
+        tw, th = tex.size
+        uvs = self._uvs
+
+        # ── Same Z-up rotation pipeline as shaded ─────────────────────────────
+        xs_r = [v[0] for v in self._verts]
+        ys_r = [v[1] for v in self._verts]
+        zs_r = [v[2] for v in self._verts]
+        cx_r = (max(xs_r) + min(xs_r)) / 2
+        cy_r = (max(ys_r) + min(ys_r)) / 2
+        cz_r = (max(zs_r) + min(zs_r)) / 2
+        mesh_span = max(max(xs_r)-min(xs_r), max(ys_r)-min(ys_r),
+                        max(zs_r)-min(zs_r), 1e-6)
+        scale = self._zoom * min(cw, ch) * 0.42 / mesh_span
+
         az, el = self._az, self._el
         caz, saz = math.cos(az), math.sin(az)
         cel, sel = math.cos(el), math.sin(el)
 
         rot = []
         for x, y, z in self._verts:
-            # Revenant D3D left-handed: Y-up. Rotate around Y (azimuth) first.
-            rx =  x * caz + z * saz
-            ry =  y
-            rz = -x * saz + z * caz
-            # Then tilt around X (elevation)
-            rot.append((rx,
-                        ry * cel - rz * sel,
-                        ry * sel + rz * cel))
+            x2, y2, z2 = x - cx_r, z - cz_r, y - cy_r   # Z-up mapping
+            rx =  x2 * caz + z2 * saz
+            ry =  y2
+            rz = -x2 * saz + z2 * caz
+            rot.append((rx, ry * cel - rz * sel, ry * sel + rz * cel))
 
-        # ── Step 2: auto-scale + orthographic project ──────────────────────
-        xs = [v[0] for v in rot]
-        ys = [v[1] for v in rot]
-        cx_v = (max(xs) + min(xs)) / 2
-        cy_v = (max(ys) + min(ys)) / 2
-        span  = max(max(xs) - min(xs), max(ys) - min(ys), 1e-6)
-        scale = self._zoom * min(cw, ch) * 0.42 / span
+        has_normals = len(self._normals) == len(self._verts)
+        rot_nrm = []
+        if has_normals:
+            for nx, ny, nz in self._normals:
+                nx2, ny2, nz2 = nx, nz, ny
+                rnx =  nx2 * caz + nz2 * saz
+                rny =  ny2
+                rnz = -nx2 * saz + nz2 * caz
+                rot_nrm.append((rnx, rny * cel - rnz * sel, rny * sel + rnz * cel))
 
-        def proj(v):
-            return (cw // 2 + (v[0] - cx_v) * scale,
-                    ch // 2 - (v[1] - cy_v) * scale,
-                    v[2])
+        cx2 = cw // 2;  cy2 = ch // 2
+        pts = [(cx2 + v[0] * scale, cy2 - v[1] * scale, v[2]) for v in rot]
 
-        pts = [proj(v) for v in rot]
+        lx, ly, lz = 0.57, 0.74, 0.37
 
-        # ── Step 3-6: draw faces ───────────────────────────────────────────
-        if self._faces:
-            # Fixed light direction in view space (upper-left, slightly forward)
-            light = self._normalize((-0.5, 0.8, 0.6))
+        # ── Collect and depth-sort faces ──────────────────────────────────────
+        face_list = []
+        for a, b, fi in self._faces:
+            if a >= len(pts) or b >= len(pts) or fi >= len(pts):
+                continue
+            ax, ay, az_ = pts[a];  bx, by, bz_ = pts[b];  fx, fy, fz_ = pts[fi]
 
-            # Build list of (avg_z, face_tuple, shade_colour)
-            draw_list = []
-            for face in self._faces:
-                ia, ib, ic = face
-                if ia >= len(pts) or ib >= len(pts) or ic >= len(pts):
-                    continue
-                pa = pts[ia]; pb = pts[ib]; pc = pts[ic]
+            if has_normals and a < len(rot_nrm):
+                na = rot_nrm[a]; nb = rot_nrm[b]; nc = rot_nrm[fi]
+                fnx = (na[0]+nb[0]+nc[0])/3; fny = (na[1]+nb[1]+nc[1])/3; fnz = (na[2]+nb[2]+nc[2])/3
+            else:
+                ra = rot[a]; rb = rot[b]; rc = rot[fi]
+                e1 = (rb[0]-ra[0], rb[1]-ra[1], rb[2]-ra[2])
+                e2 = (rc[0]-ra[0], rc[1]-ra[1], rc[2]-ra[2])
+                fnx = e1[1]*e2[2]-e1[2]*e2[1]; fny = e1[2]*e2[0]-e1[0]*e2[2]; fnz = e1[0]*e2[1]-e1[1]*e2[0]
 
-                # Face normal via cross product of screen-space edges
-                # (using the 3-D rotated positions stored in rot[] for accuracy)
-                ra = rot[ia]; rb = rot[ib]; rc = rot[ic]
-                ab = self._sub(rb, ra)
-                ac = self._sub(rc, ra)
-                fn = self._cross(ab, ac)
+            nlen = math.sqrt(fnx*fnx+fny*fny+fnz*fnz) or 1.0
+            fnx /= nlen; fny /= nlen; fnz /= nlen
+            front = fnz > 0.0
+            diff  = abs(fnx*lx + fny*ly + fnz*lz)
+            light = (0.25 + 0.75 * diff) if front else (0.06 + 0.14 * diff)
+            depth = (az_ + bz_ + fz_) / 3
 
-                # Back-face culling: view direction is (0, 0, 1) in view space
-                # (we're looking down +Z). Cull faces where normal Z <= 0.
-                if fn[2] <= 0:
-                    continue
+            ua = uvs[a][0]  if a  < len(uvs) else 0.; va = 1.-uvs[a][1]  if a  < len(uvs) else 0.
+            ub = uvs[b][0]  if b  < len(uvs) else 0.; vb = 1.-uvs[b][1]  if b  < len(uvs) else 0.
+            uf = uvs[fi][0] if fi < len(uvs) else 0.; vf = 1.-uvs[fi][1] if fi < len(uvs) else 0.
+            face_list.append((front, depth, ax, ay, bx, by, fx, fy,
+                               ua, va, ub, vb, uf, vf, light))
 
-                fn_n = self._normalize(fn)
-                intensity = self._dot(fn_n, light)
+        face_list.sort(key=lambda f: (f[0], f[1]))   # back→front
 
-                avg_z = (pa[2] + pb[2] + pc[2]) / 3.0
-                colour = self._shade_hex(
-                    self._BASE_R, self._BASE_G, self._BASE_B, intensity
-                )
-                draw_list.append((avg_z, pa, pb, pc, colour))
+        # ── Rasterize to PIL image with per-triangle affine UV mapping ────────
+        img = PILImage.new("RGB", (cw, ch), "#07070f")
 
-            # Painter's algorithm: back-to-front (highest Z drawn last = front)
-            draw_list.sort(key=lambda t: t[0])
+        for (front, depth, ax, ay, bx, by, fx, fy,
+             ua, va, ub, vb, uf, vf, light) in face_list:
 
-            for avg_z, pa, pb, pc, colour in draw_list:
-                coords = [pa[0], pa[1], pb[0], pb[1], pc[0], pc[1]]
-                c.create_polygon(coords, fill=colour,
-                                 outline=self._EDGE_COL, width=1)
-        else:
-            # Point cloud fallback
-            dot_col = "#5080d0"
-            r = max(1, int(scale * 0.05))
-            for px, py, _ in pts:
-                c.create_oval(px - r, py - r, px + r, py + r,
-                              fill=dot_col, outline="")
+            # Bounding box (clamped to canvas)
+            xlo = max(0, int(min(ax, bx, fx)))
+            xhi = min(cw, int(max(ax, bx, fx)) + 2)
+            ylo = max(0, int(min(ay, by, fy)))
+            yhi = min(ch, int(max(ay, by, fy)) + 2)
+            bbw = xhi - xlo;  bbh = yhi - ylo
+            if bbw <= 0 or bbh <= 0:
+                continue
 
-        c.create_text(6, 6, text="Drag to rotate  ·  Scroll to zoom",
-                      anchor="nw", fill=FG_MUTED, font=("Segoe UI", 8))
+            # Inverse affine: for each dest pixel (x_bb, y_bb) in bounding box,
+            # compute source texture pixel (tu, tv).
+            # Solve: [A B C; D E F] such that [ax ay 1]*[A;B;C]=ua*tw etc.
+            det = ax*(by - fy) + bx*(fy - ay) + fx*(ay - by)
+            if abs(det) < 0.5:
+                continue
+
+            A = (ua*(by-fy) + ub*(fy-ay) + uf*(ay-by)) * tw / det
+            B = (ua*(fx-bx) + ub*(ax-fx) + uf*(bx-ax)) * tw / det
+            C = (ua*(bx*fy-fx*by) + ub*(fx*ay-ax*fy) + uf*(ax*by-bx*ay)) * tw / det
+            D = (va*(by-fy) + vb*(fy-ay) + vf*(ay-by)) * th / det
+            E = (va*(fx-bx) + vb*(ax-fx) + vf*(bx-ax)) * th / det
+            F = (va*(bx*fy-fx*by) + vb*(fx*ay-ax*fy) + vf*(ax*by-bx*ay)) * th / det
+
+            # Adjust for bounding-box origin
+            C2 = A * xlo + B * ylo + C
+            F2 = D * xlo + E * ylo + F
+
+            # Texture patch via PIL affine (maps dest (x_bb,y_bb) → source (tu,tv))
+            try:
+                patch = tex.transform((bbw, bbh), PILImage.AFFINE,
+                                      data=(A, B, C2, D, E, F2),
+                                      resample=PILImage.BILINEAR)
+            except Exception:
+                continue
+
+            # Apply lighting
+            if light != 1.0:
+                patch = ImageEnhance.Brightness(patch).enhance(light)
+
+            # Triangle mask in bounding-box coordinates
+            mask = PILImage.new("L", (bbw, bbh), 0)
+            PILDraw.Draw(mask).polygon(
+                [(ax-xlo, ay-ylo), (bx-xlo, by-ylo), (fx-xlo, fy-ylo)], fill=255)
+
+            img.paste(patch, (xlo, ylo), mask)
+
+        PILDraw.Draw(img).text((6, 6),
+            "Drag to rotate  ·  Scroll to zoom  ·  [Textured]",
+            fill=(80, 100, 130))
+
+        # ── Display ───────────────────────────────────────────────────────────
+        from PIL import ImageTk
+        photo = ImageTk.PhotoImage(img)
+        self._photo_ref = photo
+        c.delete("all")
+        c.create_image(0, 0, anchor="nw", image=photo)
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -1685,9 +2505,59 @@ class ModelsTab(tk.Frame):
         hdr.pack(fill="x")
         tk.Label(hdr, text="MODEL DETAILS", bg=BG_PANEL, fg=ACCENT,
                  font=("Segoe UI", 11, "bold")).pack(side="left")
+        tk.Button(hdr, text="Export glTF", bg=ACCENT2, fg="#000000",
+                  relief="flat", font=("Segoe UI", 9, "bold"), padx=8,
+                  command=self._export_gltf).pack(side="right", padx=(0, 4))
         tk.Button(hdr, text="Export OBJ", bg=ACCENT3, fg="#000000",
                   relief="flat", font=("Segoe UI", 9, "bold"), padx=8,
                   command=self._export_obj).pack(side="right")
+
+        ttk.Separator(det).pack(fill="x")
+
+        # ── Animation controls bar ────────────────────────────────────────
+        anim_bar = tk.Frame(det, bg=BG_DARK, padx=8, pady=4)
+        anim_bar.pack(fill="x")
+
+        tk.Label(anim_bar, text="State:", bg=BG_DARK, fg=FG_DIM,
+                 font=("Segoe UI", 9)).pack(side="left")
+
+        self._state_var = tk.StringVar(value="[0] Bind pose")
+        self._state_cb  = ttk.Combobox(anim_bar, textvariable=self._state_var,
+                                        state="readonly", width=22,
+                                        font=("Segoe UI", 9))
+        self._state_cb.pack(side="left", padx=(4, 8))
+        self._state_cb.bind("<<ComboboxSelected>>", self._on_state_select)
+
+        # Frame scrubber (shown only for multi-frame states)
+        self._frame_var = tk.IntVar(value=0)
+        self._frame_lbl = tk.Label(anim_bar, text="Frame:", bg=BG_DARK, fg=FG_DIM,
+                                    font=("Segoe UI", 9))
+        self._frame_scale = tk.Scale(anim_bar, variable=self._frame_var,
+                                      from_=0, to=0, orient="horizontal",
+                                      bg=BG_DARK, fg=FG_TEXT, highlightthickness=0,
+                                      troughcolor=BG_PANEL, activebackground=ACCENT,
+                                      length=80, showvalue=True,
+                                      command=self._on_frame_change)
+
+        # Play / Stop buttons
+        self._play_btn = tk.Button(anim_bar, text="▶ Play", bg=BG_MID, fg=FG_TEXT,
+                                    relief="flat", font=("Segoe UI", 9), padx=6,
+                                    command=self._anim_play)
+        self._stop_btn = tk.Button(anim_bar, text="■ Stop", bg=BG_MID, fg=FG_TEXT,
+                                    relief="flat", font=("Segoe UI", 9), padx=6,
+                                    command=self._anim_stop)
+        self._play_btn.pack(side="left", padx=(0, 2))
+        self._stop_btn.pack(side="left", padx=(0, 8))
+
+        self._fps_var = tk.IntVar(value=8)
+        tk.Label(anim_bar, text="FPS:", bg=BG_DARK, fg=FG_DIM,
+                 font=("Segoe UI", 9)).pack(side="left")
+        tk.Spinbox(anim_bar, textvariable=self._fps_var, from_=1, to=30,
+                   width=3, bg=BG_PANEL, fg=FG_TEXT, relief="flat",
+                   font=("Segoe UI", 9)).pack(side="left", padx=(2, 0))
+
+        self._anim_job  = None   # after() job id
+        self._anim_frame = 0     # current playback frame
 
         ttk.Separator(det).pack(fill="x")
 
@@ -1697,10 +2567,10 @@ class ModelsTab(tk.Frame):
         vpane.pack(fill="both", expand=True)
 
         meta_frame = tk.Frame(vpane, bg=BG_PANEL, padx=8, pady=4)
-        vpane.add(meta_frame, minsize=120)
+        vpane.add(meta_frame, minsize=100)
         self._det_text = tk.Text(meta_frame, bg=BG_PANEL, fg=FG_TEXT,
                                   font=("Consolas", 9), relief="flat",
-                                  state="disabled", wrap="word", height=9)
+                                  state="disabled", wrap="word", height=7)
         self._det_text.pack(fill="both", expand=True)
         self._det_text.tag_configure("h",   foreground=ACCENT,  font=("Segoe UI", 10, "bold"))
         self._det_text.tag_configure("kv",  foreground=ACCENT2, font=("Segoe UI", 9))
@@ -1709,7 +2579,9 @@ class ModelsTab(tk.Frame):
         self._viewer = ModelViewer3D(vpane)
         vpane.add(self._viewer, minsize=200)
 
-        self._current_geom = None   # holds last decoded I3DGeometry
+        self._current_geom    = None   # holds last decoded I3DGeometry
+        self._current_texture = None   # holds last loaded PIL texture (for export)
+        self._current_path    = None   # path of currently selected model
 
     def _load_all(self):
         self._status.set("Scanning i3d model files...")
@@ -1721,14 +2593,18 @@ class ModelsTab(tk.Frame):
                 continue
             seen.add(key)
             anim_count = parse_i3d_anim_count(f)
-            # Quick geometry read
+            # Quick vertex count: Layout A = sec[1].count, Layout B = sec[1].rel
             verts = 0
             try:
                 raw = f.read_bytes()
-                count = struct.unpack_from('<I', raw, 0x18)[0]
-                geom_off = 0x54 + count * 76
-                if len(raw) >= geom_off + 8:
-                    verts = struct.unpack_from('<I', raw, geom_off + 4)[0]
+                if len(raw) >= 28 and raw[:4] == b'CGSR':
+                    hdrsize    = struct.unpack_from('<I', raw, 16)[0]
+                    geom_start = 20 + hdrsize
+                    if geom_start + 24 <= len(raw):
+                        sec1_rel = struct.unpack_from('<I', raw, geom_start + 8)[0]     # Layout B vc
+                        sec1_cnt = struct.unpack_from('<I', raw, geom_start + 8 + 4)[0] # Layout A vc
+                        sec2_cnt = struct.unpack_from('<I', raw, geom_start + 16 + 4)[0]
+                        verts = sec1_cnt if sec2_cnt > 0 else sec1_rel
             except Exception:
                 pass
             models.append({
@@ -1770,21 +2646,27 @@ class ModelsTab(tk.Frame):
         if not m:
             return
 
-        # Read animation state names
-        state_names = []
-        try:
-            raw      = m["path"].read_bytes()
-            count    = struct.unpack_from('<I', raw, 0x18)[0]
-            def_name = raw[0x1C:0x40].split(b'\x00')[0].decode('ascii', 'replace')
-            for i in range(min(count, 500)):
-                off        = 0x54 + i * 76
-                name_bytes = raw[off + 20:off + 76].split(b'\x00')[0]
-                sname      = name_bytes.decode('ascii', 'replace').strip()
-                if sname:
-                    state_names.append(sname)
-        except Exception:
-            def_name = "?"
+        self._anim_stop()
+        self._current_path = m["path"]
 
+        # Load animation state list via fast decoder
+        from decoders.i3d import list_anim_states
+        anim_states = list_anim_states(m["path"])
+
+        # Populate state combobox
+        state_entries = ["[0] Bind pose (T-pose)"]
+        for s in anim_states:
+            tag = "cycle" if s.anim_type == 0 else "pose"
+            nf  = f" ×{s.nframes}f" if s.anim_type == 0 and s.nframes > 0 else ""
+            state_entries.append(f"[{s.index + 1}] {s.name}  ({tag}{nf})")
+        self._state_cb["values"] = state_entries
+        self._state_cb.current(0)
+        self._frame_var.set(0)
+        self._frame_scale.config(to=0)
+        self._frame_lbl.pack_forget()
+        self._frame_scale.pack_forget()
+
+        # Fill metadata panel
         txt = self._det_text
         txt.configure(state="normal")
         txt.delete("1.0", "end")
@@ -1794,53 +2676,168 @@ class ModelsTab(tk.Frame):
             txt.insert("end", f"  {k:<20}", "kv")
             txt.insert("end", f"{v}\n")
 
-        row("Folder",        m["folder"])
-        row("File size",     f"{m['size_kb']:,} KB  ({m['path'].stat().st_size:,} bytes)")
-        row("Anim states",   str(m["anims"]))
-        row("Est. vertices", str(m["verts"]) if m["verts"] else "unknown")
-        row("Default state", def_name)
+        row("Folder",      m["folder"])
+        row("File size",   f"{m['size_kb']:,} KB  ({m['path'].stat().st_size:,} bytes)")
+        row("Anim states", str(len(anim_states)) if anim_states else "0")
 
-        if state_names:
-            txt.insert("end", f"\nAnimation States ({len(state_names)}):\n", "kv")
-            for sn in state_names:
-                txt.insert("end", f"  • {sn}\n", "list")
+        if anim_states:
+            txt.insert("end", f"\nAnimation States ({len(anim_states)}):\n", "kv")
+            for s in anim_states:
+                tag = "cycle" if s.anim_type == 0 else "pose"
+                nf  = f" ×{s.nframes}f" if s.anim_type == 0 and s.nframes > 0 else ""
+                txt.insert("end", f"  [{s.index:>2}] {s.name}  ({tag}{nf})\n", "list")
 
         txt.configure(state="disabled")
 
-        # ── Async geometry decode → 3D viewer ────────────────────────────────
-        self._current_geom = None
-        self._viewer.load([], [], "Decoding geometry…")
+        # Async geometry decode → 3D viewer
+        self._decode_model(m["path"])
 
-        def _decode(path=m["path"]):
+    def _on_state_select(self, _=None):
+        """User selected a new animation state from the combobox."""
+        if self._current_geom is None:
+            return
+        self._anim_stop()
+        idx = self._state_cb.current()   # 0 = bind pose, 1..N = state 0..N-1
+        self._apply_state(idx)
+
+    def _apply_state(self, combo_idx: int, frame: int = 0):
+        """Apply combo_idx (0=bind-pose, 1..N = anim state 0..N-1) at given frame."""
+        geom = self._current_geom
+        if geom is None:
+            return
+        from decoders.i3d import load_state
+        if combo_idx == 0:
+            ok = load_state(geom, 0, 0)   # bind pose
+        else:
+            state_idx = combo_idx - 1     # index into anim_states list
+            ok = load_state(geom, state_idx, frame)
+
+        if ok:
+            # Update frame scrubber visibility
+            if combo_idx > 0:
+                st = geom.anim_states[combo_idx - 1]
+                max_f = max(0, (st.nframes or 1) - 1)
+            else:
+                max_f = 0
+
+            if max_f > 0:
+                self._frame_lbl.pack(side="left", padx=(8, 2))
+                self._frame_scale.config(to=max_f)
+                self._frame_scale.pack(side="left")
+            else:
+                self._frame_lbl.pack_forget()
+                self._frame_scale.pack_forget()
+
+            has_uvs = len(geom.uvs) == len(geom.vertices)
+            has_nrm = len(geom.normals) == len(geom.vertices)
+            extras  = (["+normals"] if has_nrm else []) + (["+UVs"] if has_uvs else [])
+            state_label = "bind" if combo_idx == 0 else geom.anim_states[combo_idx - 1].name
+            info = (f"{len(geom.vertices):,} verts  ·  {len(geom.faces):,} faces"
+                    f"  ·  state: {state_label}"
+                    + (f"  ·  frame {frame}" if max_f > 0 else "")
+                    + ("  ·  " + " ".join(extras) if extras else ""))
+            self._viewer.load(geom.vertices, geom.faces, info,
+                              normals=geom.normals if has_nrm else None,
+                              uvs=geom.uvs if has_uvs else None)
+
+    def _on_frame_change(self, val=None):
+        """Frame scrubber moved."""
+        self._anim_stop()
+        frame = self._frame_var.get()
+        combo_idx = self._state_cb.current()
+        self._apply_state(combo_idx, frame)
+
+    def _anim_play(self):
+        """Start animation playback for multi-frame states."""
+        if self._current_geom is None:
+            return
+        combo_idx = self._state_cb.current()
+        if combo_idx == 0:
+            return
+        geom = self._current_geom
+        st = geom.anim_states[combo_idx - 1]
+        nf = max(1, st.nframes or 1)
+        if nf <= 1:
+            return
+        self._anim_stop()
+        self._anim_frame = self._frame_var.get()
+        self._play_btn.config(relief="sunken")
+        self._anim_tick(combo_idx, nf)
+
+    def _anim_tick(self, combo_idx: int, nf: int):
+        fps = max(1, self._fps_var.get())
+        self._apply_state(combo_idx, self._anim_frame)
+        self._frame_var.set(self._anim_frame)
+        self._anim_frame = (self._anim_frame + 1) % nf
+        self._anim_job = self.after(int(1000 / fps), self._anim_tick, combo_idx, nf)
+
+    def _anim_stop(self):
+        if self._anim_job is not None:
+            self.after_cancel(self._anim_job)
+            self._anim_job = None
+        self._play_btn.config(relief="flat")
+
+
+
+    def _decode_model(self, path: Path):
+        """Decode geometry + texture for the given .i3d file and update viewer."""
+        self._current_geom    = None
+        self._current_texture = None
+        self._viewer.load([], [], "Decoding…")
+
+        def _worker(p=path):
             try:
                 from decoders.i3d import decode_i3d_geometry
-                geom = decode_i3d_geometry(path)
+                geom = decode_i3d_geometry(p)
             except Exception:
                 geom = None
-            self._current_geom = geom
+
+            # Try sidecar texture (.bmp/.png/.tga) then embedded i3d texture
+            tex = ModelViewer3D.load_texture_for(p)
+
+            self._current_geom    = geom
+            self._current_texture = tex
             if geom:
+                has_uvs = len(geom.uvs) == len(geom.vertices)
+                has_nrm = len(geom.normals) == len(geom.vertices)
+                tex_tag = "  ·  +texture" if tex else ""
+                extras  = (["+normals"] if has_nrm else []) + (["+UVs"] if has_uvs else [])
+                extras_str = ("  ·  " + " ".join(extras)) if extras else ""
+                n_states = len(geom.anim_states)
                 info = (f"{len(geom.vertices):,} verts  ·  "
                         f"{len(geom.faces):,} faces  ·  "
-                        f"stride {geom.stride} B  ·  {geom.decode_method}")
+                        f"{n_states} anim states{extras_str}{tex_tag}")
             else:
                 info = "Geometry format not detected"
-            self.after(0, lambda: self._viewer.load(
-                geom.vertices if geom else [],
-                geom.faces    if geom else [],
-                info,
-            ))
 
-        threading.Thread(target=_decode, daemon=True).start()
+            def _update():
+                self._viewer.load(
+                    geom.vertices if geom else [],
+                    geom.faces    if geom else [],
+                    info,
+                    normals  = geom.normals if (geom and len(geom.normals)==len(geom.vertices)) else None,
+                    uvs      = geom.uvs     if (geom and len(geom.uvs)    ==len(geom.vertices)) else None,
+                    texture  = tex,
+                )
+                if self._state_cb.current() != 0:
+                    self._state_cb.current(0)
+            self.after(0, _update)
+
+        threading.Thread(target=_worker, daemon=True).start()
+
+
 
     def _export_obj(self):
-        """Save current model geometry as Wavefront OBJ."""
+        """Save current model as Wavefront OBJ (+ .mtl and texture .png if available)."""
         if self._current_geom is None:
             self._status.set("No geometry — select a model and wait for decode first")
             return
         geom = self._current_geom
+        tex  = self._current_texture
         default_name = geom.path.stem + ".obj"
         out = filedialog.asksaveasfilename(
             title="Export OBJ",
+            initialdir=str(Path.home() / "Desktop"),
             initialfile=default_name,
             defaultextension=".obj",
             filetypes=[("Wavefront OBJ", "*.obj"), ("All files", "*.*")],
@@ -1848,11 +2845,41 @@ class ModelsTab(tk.Frame):
         if not out:
             return
         from decoders.i3d import export_obj
-        if export_obj(geom, Path(out)):
+        if export_obj(geom, Path(out), texture=tex):
+            tex_note = " + texture" if tex else ""
             self._status.set(f"OBJ saved: {Path(out).name}  "
-                             f"({len(geom.vertices):,} verts, {len(geom.faces):,} faces)")
+                             f"({len(geom.vertices):,} verts, {len(geom.faces):,} faces{tex_note})")
         else:
             self._status.set("OBJ export failed")
+
+    def _export_gltf(self):
+        """Save current model geometry as glTF 2.0 (with normals + UVs)."""
+        if self._current_geom is None:
+            self._status.set("No geometry — select a model and wait for decode first")
+            return
+        geom = self._current_geom
+        default_name = geom.path.stem + ".gltf"
+        out = filedialog.asksaveasfilename(
+            title="Export glTF 2.0",
+            initialdir=str(Path.home() / "Desktop"),
+            initialfile=default_name,
+            defaultextension=".gltf",
+            filetypes=[("glTF 2.0", "*.gltf"), ("All files", "*.*")],
+        )
+        if not out:
+            return
+        from decoders.i3d import export_gltf
+        has_uvs = len(geom.uvs) == len(geom.vertices)
+        has_nrm = len(geom.normals) == len(geom.vertices)
+        if export_gltf(geom, Path(out)):
+            extras = []
+            if has_nrm: extras.append("normals")
+            if has_uvs: extras.append("UVs")
+            extras_str = " + " + " + ".join(extras) if extras else ""
+            self._status.set(f"glTF saved: {Path(out).name}  "
+                             f"({len(geom.vertices):,} verts, {len(geom.faces):,} faces{extras_str})")
+        else:
+            self._status.set("glTF export failed")
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -2109,7 +3136,7 @@ class SpritesTab(tk.Frame):
         def _worker():
             # Try full i2d decode first
             img = None
-            if i2d_path.exists():
+            if i2d_path.is_file():
                 try:
                     from decoders.i2d import decode_i2d
                     img = decode_i2d(i2d_path)
@@ -2182,7 +3209,7 @@ class SpritesTab(tk.Frame):
                 out = dest / f"{tn_path.stem}.png"
                 img = None
                 # Try full i2d decode first
-                if i2d_path.exists():
+                if i2d_path.is_file():
                     try:
                         from decoders.i2d import decode_i2d
                         img = decode_i2d(i2d_path)

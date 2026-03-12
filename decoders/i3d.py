@@ -1,400 +1,914 @@
 """
-RevEngine - i3d Geometry Decoder
-=================================
+RevEngine - i3d Geometry Decoder  (v8 — Source-Confirmed Format)
+=================================================================
 Decodes Revenant (1999) .i3d 3D model geometry.
 
-File structure (reverse-engineered):
+FILE STRUCTURE (confirmed from Revenant source: 3dimage.cpp, 3dimagebody.h, resourcehdr.h):
 
-  CGSR header (variable size):
+  FileResHdr (20 bytes) at offset 0:
     [0:4]   'CGSR' magic
-    [4:8]   version flags (0x01000000)
-    [8:12]  content_size  ← payload_start = file_size - content_size
-    [12:16] content_size (duplicate)
-    [16:20] hdr_size (84 for 1-state; grows with extra states)
-    [20:24] state_count (animation states)
-    [24:28] mesh_count (usually 1)
-    [28:104] first STIL state entry (76 bytes, includes bounding box)
-    [104 + (state_count-1)*76 :]  additional state entries (one per extra state)
+    [4:6]   topbm   (uint16)
+    [6]     comptype (0=none)
+    [7]     version  (1)
+    [8:12]  datasize
+    [12:16] objsize
+    [16:20] hdrsize  (uint32) — size of SImageryHeader, NOT including FileResHdr
 
-  Payload starts at: file_size - content_size_field
-    [+0 : +56]  Section table  — 7 × 8-byte entries (uint32 offset, uint32 count)
-      entry 0: [+0 :+8 ]  (header / metadata block)
-      entry 1: [+8 :+16]  offset=vertex_data_offset, count=vertex_count   (CONFIRMED)
-      entry 2: [+16:+24]  offset=face_data_offset,   count=face_count      (CONFIRMED)
-      entries 3-6: additional data sections (UVs, normals, materials, etc.)
-    [+56 : vertex_start]  metadata (name string, bounding sphere, etc.)
-    [vertex_start : face_start]  vertex_count × stride bytes of vertex data
-    [face_start : face_end]      face_count × 6 bytes (uint16 triplets)
+  SImageryHeader at offset 20:
+    [0:4]   imageryid  (int32)
+    [4:8]   numstates  (int32)
+    [8 + i*76]  SImageryStateHeader[i] (76 bytes each):
+      [0:32]  animname  (null-terminated ASCII, 32 bytes)
+      [32:36] OFFSET walkmap
+      [36:40] DWORD flags
+      [40:42] short aniflags
+      [42:44] short frames
+      ... (more state metadata, not needed for geometry)
 
-  Section offsets are relative to payload_start.
-  Primary decode uses these directly; heuristic scan is fallback only.
+  Body starts at:  body_base = 20 + hdrsize
 
-  Vertex format (stride 32 — D3DFVF_XYZ | D3DFVF_NORMAL | D3DFVF_TEX1):
-    [+0:12]  float32 x, y, z    ← world-space position
-    [+12:24] float32 nx, ny, nz ← surface normal (unit vector)
-    [+24:32] float32 u, v       ← texture UV coordinates
+  NEW FORMAT (I3D_3DIMAGEBODY2 = 0x10 set in flags):
+    S3DImageryBody (all offsets are TOffset — relative to the field's own address):
+      [0]  DWORD flags
+      [4]  DWORD version
+      [8]  OS3DImageryState  statedata   (OFFSET)
+      [12] int   numverts
+      [16] OOOD3DVERTEX  verts           (3-level OFFSET chain)
+      [20] int   numfaces
+      [24] OS3DFace  faces               (1-level OFFSET)
+      [28] int   nummaterials
+      [32] OD3DMATERIAL  materials       (OFFSET)
+      [36] int   numtextures
+      [40] OS3DImageryTexture textures   (OFFSET)
+      [44] int   numobjects
+      [48] OS3DImageryObject objects     (OFFSET)
+      [52] int   numtags
+      [56] OS3DImageryTag tags           (OFFSET)
 
-  Face format:
-    3 × uint16 per triangle (vertex indices, 0-based)
+    D3DVERTEX (32 bytes): x,y,z (12) + nx,ny,nz (12) + tu,tv (8)
 
-Geometry detection — two-pass strategy:
-  Pass 1 (section-table): read section[1].offset and section[2].offset directly.
-    Validate that the derived vertex and face buffers contain plausible data.
-    Use if valid.
-  Pass 2 (heuristic scan, fallback):
-    1. Scan payload in steps of 6 bytes for a run of face_count valid uint16
-       triplets (indices < vc, at least one index > 1 to reject zero-filled blocks).
-    2. Working backwards from face_start, find vertex stride by verifying
-       vc*stride bytes of valid float triples end exactly at face_start.
-    3. Prefer stride=32 (standard D3D7); fallback chain: 28,40,36,44,24,48,20,16.
+    S3DFace (6 bytes): WORD v1, WORD v2, WORD v3  — LOCAL indices per object!
 
-COVERAGE: 577/622 files decoded (45 have fc=0 — particles/effects).
+    S3DImageryObject (48 bytes, at objects_base + i*48):
+      [0:32]  char name[32]
+      [32:34] WORD material
+      [34:36] WORD vertpos    — first vertex index in global vert array
+      [36:38] WORD vertnum    — number of vertices for this object
+      [38:40] WORD pad
+      [40:44] OS3DImageryObjectTexture textures  (OFFSET to array)
+      [44:48] OS3DImageryObjectState   states    (OFFSET to array)
+
+    S3DImageryObjectTexture (4 bytes): WORD facepos, WORD facenum
+      — textures[0] = "no texture" group
+      — textures[1..numtextures] = one entry per texture
+
+    CRITICAL: Face indices (v1,v2,v3) in each S3DFace are LOCAL to the owning
+    object's vertex range (0..vertnum-1). To get global vertex indices, add vertpos.
+
+  OLD FORMAT (I3D_3DIMAGEBODY2 = 0x10 NOT set):
+    SOld3DImageryBody — used by magic effects (simple quads, fire, etc.):
+      [0]  DWORD flags
+      [4]  int   numverts
+      [8]  OFFSET verts[64]   — verts[0] → frame-array of OFFSETs → vertex data
+      [264] int  numfaces
+      [268] OFFSET faces      — 1-level OFFSET to S3DFace array
+    Face indices are global (single-object models).
 """
 
 from __future__ import annotations
-import struct
 import math
+import struct
+import json
+import base64
 from pathlib import Path
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Optional, List, Tuple
 
 CGSR_MAGIC = b'CGSR'
+STRIDE     = 32          # D3DVERTEX stride in bytes
+MAX_COORD  = 50_000.0
 
-# Vertex stride preference: 32 first (most common D3D7 FVF for pos+normal+uv)
-VALID_STRIDES = (32, 28, 40, 36, 44, 24, 48, 20, 16)
-
-MAX_COORD = 50_000.0
+# Source flags
+I3D_3DIMAGEBODY2 = 0x10   # Uses S3DImageryBody (new format)
 
 
-# ─── Data class ───────────────────────────────────────────────────────────────
+# --- Data classes -------------------------------------------------------------
+
+@dataclass
+class AnimState:
+    name      : str
+    index     : int
+    anim_type : int = 0   # placeholder (skeletal anim, not morph)
+    nframes   : int = 0   # placeholder
+    vbase     : int = 0   # placeholder
+    vpc       : int = 0   # placeholder
+
 
 @dataclass
 class I3DGeometry:
-    vertices      : List[Tuple[float, float, float]]   # (x, y, z) per vertex
-    faces         : List[Tuple[int,   int,   int  ]]   # triangle indices (0-based)
-    normals       : List[Tuple[float, float, float]]   # (nx, ny, nz) per vertex
-    uvs           : List[Tuple[float, float]]          # (u, v) per vertex
-    stride        : int                                # detected vertex stride (bytes)
-    vert_count    : int                                # vertex count from section table
-    idx_count     : int                                # face count from section table
-    path          : Path                               # source .i3d file
-    decode_method : str = "unknown"                    # "section_table" or "scan"
+    vertices    : List[Tuple[float, float, float]]
+    faces       : List[Tuple[int,   int,   int  ]]
+    stride      : int
+    vert_count  : int
+    idx_count   : int
+    path        : Path
+    normals     : List[Tuple[float, float, float]] = field(default_factory=list)
+    uvs         : List[Tuple[float, float]]        = field(default_factory=list)
+    anim_states : List[AnimState]                  = field(default_factory=list)
+    state_index : int = 0
+    # Kept for API compatibility; bind-pose only (no morph animation in new format)
+    _raw_vbuf   : bytes = field(default_factory=bytes, repr=False)
+    _vbuf_start : int   = 0
+    _bind_vc    : int   = 0
 
 
-# ─── Internal helpers ─────────────────────────────────────────────────────────
+# --- Low-level helpers --------------------------------------------------------
 
-def _valid_coord(v: float) -> bool:
-    return math.isfinite(v) and abs(v) < MAX_COORD
-
-def _valid_uv(v: float) -> bool:
-    return math.isfinite(v) and -10.0 <= v <= 10.0
-
-def _valid_normal(v: float) -> bool:
-    return math.isfinite(v) and -2.0 <= v <= 2.0
+def _deref(raw: bytes, field_pos: int) -> int:
+    """Dereference a TOffset field: returns field_pos + stored_int32 value."""
+    val = struct.unpack_from('<i', raw, field_pos)[0]
+    if val == 0:
+        return 0   # NULL offset
+    return field_pos + val
 
 
-def _validate_vertex_block(raw: bytes, vstart: int, vc: int, stride: int,
-                            n_check: int = 32) -> int:
-    """
-    Validate that a proposed vertex block contains plausible XYZ floats.
-    Returns a quality score (0 = invalid, >0 = valid with that confidence).
-    """
-    if vstart < 0 or vstart + vc * stride > len(raw):
-        return 0
-
-    quality = 0
-    check   = min(vc, n_check)
-    for i in range(check):
-        voff = vstart + i * stride
-        if voff + 12 > len(raw):
-            return 0
-        x, y, z = struct.unpack_from('<fff', raw, voff)
-        if not (_valid_coord(x) and _valid_coord(y) and _valid_coord(z)):
-            return 0
-        if abs(x) > 0.001 or abs(y) > 0.001 or abs(z) > 0.001:
-            quality += 1
-
-    return quality
-
-
-def _validate_face_block(raw: bytes, fstart: int, fc: int, vc: int) -> int:
-    """
-    Validate that a proposed face block contains plausible index triplets.
-    Returns max_index seen (>1 = valid, 0 = invalid / all-zero sentinels).
-    """
-    if fstart < 0 or fstart + fc * 6 > len(raw):
-        return 0
-
-    max_idx = 0
-    for i in range(fc):
-        foff = fstart + i * 6
-        a, b, c = struct.unpack_from('<HHH', raw, foff)
-        if a >= vc or b >= vc or c >= vc:
-            return 0
-        if a > max_idx: max_idx = a
-        if b > max_idx: max_idx = b
-        if c > max_idx: max_idx = c
-
-    return max_idx
-
-
-# ─── Primary decode: section table offsets ────────────────────────────────────
-
-def _try_section_table(raw: bytes, payload_start: int, vc: int,
-                       fc: int) -> Optional[Tuple[int, int, int, str]]:
-    """
-    Attempt to locate vertex/face data using the section table offsets at
-    payload[+8] and payload[+16].  These are byte offsets relative to
-    payload_start.
-
-    Returns (vstart, stride, fstart, "section_table") or None.
-    """
-    if payload_start + 24 > len(raw):
-        return None
-
-    sec1_off = struct.unpack_from('<I', raw, payload_start + 8 )[0]
-    sec2_off = struct.unpack_from('<I', raw, payload_start + 16)[0]
-
-    # Sanity: offsets must be positive, distinct, and fit within the file.
-    if sec1_off == 0 or sec2_off == 0:
-        return None
-    if sec1_off >= sec2_off:
-        return None
-
-    vstart_candidate = payload_start + sec1_off
-    fstart_candidate = payload_start + sec2_off
-
-    if fstart_candidate + fc * 6 > len(raw):
-        return None
-
-    # Validate face block first (cheaper)
-    max_idx = _validate_face_block(raw, fstart_candidate, fc, vc)
-    if max_idx <= 1:
-        return None
-
-    # Derive stride from the gap between vertex and face blocks.
-    gap = fstart_candidate - vstart_candidate
-    if gap <= 0:
-        return None
-
-    # Try the exact stride implied by the gap first.
-    exact_stride = gap // vc if vc > 0 else 0
-    ordered_strides = list(VALID_STRIDES)
-    if exact_stride in ordered_strides:
-        ordered_strides.remove(exact_stride)
-        ordered_strides.insert(0, exact_stride)
-
-    for stride in ordered_strides:
-        vstart = fstart_candidate - vc * stride
-        if vstart < payload_start:
+def _read_verts(raw: bytes, vstart: int, vc: int):
+    """Parse vc D3DVERTEX structs (stride 32) from file offset vstart."""
+    vertices, normals, uvs = [], [], []
+    for i in range(vc):
+        voff = vstart + i * STRIDE
+        if voff + STRIDE > len(raw):
+            vertices.append((0., 0., 0.))
+            normals.append((0., 1., 0.))
+            uvs.append((0., 0.))
             continue
-        q = _validate_vertex_block(raw, vstart, vc, stride)
-        if q > 0:
-            return (vstart, stride, fstart_candidate, "section_table")
+        x,  y,  z  = struct.unpack_from('<fff', raw, voff)
+        nx, ny, nz = struct.unpack_from('<fff', raw, voff + 12)
+        u,  v      = struct.unpack_from('<ff',  raw, voff + 24)
+        vertices.append((x, y, z)   if all(math.isfinite(c) and abs(c) < MAX_COORD for c in (x, y, z))   else (0., 0., 0.))
+        normals.append((nx, ny, nz) if all(math.isfinite(c) and abs(c) <= 1.01     for c in (nx, ny, nz)) else (0., 1., 0.))
+        uvs.append((u, v)           if all(math.isfinite(c) and abs(c) <= 16.0     for c in (u, v))       else (0., 0.))
+    return vertices, normals, uvs
 
+
+# --- 4×4 matrix helpers (row-major, row-vector convention) -------------------
+# Matches Revenant's d3dmath.cpp exactly:
+#   MultiplyD3DMATRIX: C[r][c] = sum(A[r][k]*B[k][c])
+#   D3DMATRIXTransform: d.x = _11*v.x + _21*v.y + _31*v.z + _41  (col 0 of mat)
+#   i.e. vertex transform is  v_out = v_in @ M  (row vector on left)
+
+def _mat_id():
+    return [1.,0.,0.,0., 0.,1.,0.,0., 0.,0.,1.,0., 0.,0.,0.,1.]
+
+def _mat_mul(a, b):
+    c = [0.]*16
+    for r in range(4):
+        for col in range(4):
+            s = 0.
+            for k in range(4):
+                s += a[r*4+k] * b[k*4+col]
+            c[r*4+col] = s
+    return c
+
+def _mat_rx(a):
+    c, s = math.cos(a), math.sin(a)
+    m = _mat_id(); m[5]=c; m[6]=s; m[9]=-s; m[10]=c; return m
+
+def _mat_ry(a):
+    c, s = math.cos(a), math.sin(a)
+    m = _mat_id(); m[0]=c; m[2]=-s; m[8]=s; m[10]=c; return m
+
+def _mat_rz(a):
+    c, s = math.cos(a), math.sin(a)
+    m = _mat_id(); m[0]=c; m[1]=s; m[4]=-s; m[5]=c; return m
+
+def _mat_t(tx, ty, tz):
+    m = _mat_id(); m[12]=tx; m[13]=ty; m[14]=tz; return m
+
+def _mat_s(sx, sy, sz):
+    m = _mat_id(); m[0]=sx; m[5]=sy; m[10]=sz; return m
+
+def _make_bone_mat(pos, rot, scl):
+    """Build bone local matrix: identity → RotX → RotY → RotZ → Translate → Scale.
+    Matches MakeMatrix() in 3dimage.cpp."""
+    m = _mat_id()
+    if rot[0]: m = _mat_mul(m, _mat_rx(rot[0]))
+    if rot[1]: m = _mat_mul(m, _mat_ry(rot[1]))
+    if rot[2]: m = _mat_mul(m, _mat_rz(rot[2]))
+    if pos[0] or pos[1] or pos[2]: m = _mat_mul(m, _mat_t(*pos))
+    if scl[0]!=1. or scl[1]!=1. or scl[2]!=1.: m = _mat_mul(m, _mat_s(*scl))
+    return m
+
+def _xform_pos(v, m):
+    """v' = [vx, vy, vz, 1] @ m  (row-vector, row-major)."""
+    x, y, z = v
+    return (x*m[0]+y*m[4]+z*m[8]+m[12],
+            x*m[1]+y*m[5]+z*m[9]+m[13],
+            x*m[2]+y*m[6]+z*m[10]+m[14])
+
+def _xform_nrm(n, m):
+    """Transform normal by 3×3 rotation sub-matrix, then renormalize."""
+    nx, ny, nz = n
+    ox = nx*m[0]+ny*m[4]+nz*m[8]
+    oy = nx*m[1]+ny*m[5]+nz*m[9]
+    oz = nx*m[2]+ny*m[6]+nz*m[10]
+    mag = math.sqrt(ox*ox+oy*oy+oz*oz)
+    return (ox/mag, oy/mag, oz/mag) if mag > 1e-6 else (0., 1., 0.)
+
+
+# --- SAniKey32 frame-0 parser -------------------------------------------------
+# SAniKey32 bit layout (confirmed from 3dimagebody.h):
+#   bits  0- 1: flags  (0=CODE, 1=POS, 2=ROT, 3=SCL)
+#   bits  2-11: x  (10-bit signed) OR  bits 2-7: code (6-bit) + bits 8-31: value (24-bit signed)
+#   bits 12-21: y  (10-bit signed)
+#   bits 22-31: z  (10-bit signed)
+# Scales: POSSCALE=4, ROTSCALE=512/π, SCLSCALE=64, CODESCALE=256
+
+def _parse_frame0_anikey32(raw: bytes, keys_start: int, numkeys: int):
+    """Return (pos, rot, scl) lists for frame 0 of an SAniKey32 stream."""
+    POSSCALE  = 4.0
+    ROTSCALE  = 512.0 / math.pi
+    SCLSCALE  = 64.0
+    CODESCALE = 256.0
+
+    def s10(n): n &= 0x3FF; return n - 1024 if n >= 512 else n
+    def s24(kv): v = kv >> 8; return (v - 0x1000000) if (v & 0x800000) else v
+
+    posidx = rotidx = sclidx = -1
+    fflags = 0  # bit0=POSCHANGED, bit1=ROTCHANGED, bit2=SCLCHANGED
+
+    i = 0
+    while i < numkeys:
+        kp = keys_start + i * 4
+        if kp + 4 > len(raw): break
+        kv = struct.unpack_from('<I', raw, kp)[0]
+        t  = kv & 0x3
+        if t == 0:   # CODE
+            code = (kv >> 2) & 0x3F
+            if code <= 1:                   break        # NEXTFRAME / SKIP → end of frame
+            elif code == 2:                              # POSX
+                if fflags: break
+                posidx = i
+            elif code == 3:                              # POSY
+                if fflags: break
+            elif code == 4:                              # POSZ
+                if fflags: break
+                fflags |= 1
+            elif code == 5:                              # ROTX
+                if fflags & 6: break
+                rotidx = i
+            elif code == 6:                              # ROTY
+                if fflags & 6: break
+            elif code == 7:                              # ROTZ
+                if fflags & 6: break
+                fflags |= 2
+            elif code == 8:                              # SCLX
+                if fflags & 4: break
+                sclidx = i
+            elif code in (9, 10):                        # SCLY / SCLZ
+                if fflags & 4: break
+                if code == 10: fflags |= 4
+        elif t == 1:  # ANIFLAG32_POS (10-bit xyz)
+            if fflags: break
+            posidx = i; fflags |= 1
+        elif t == 2:  # ANIFLAG32_ROT (10-bit xyz)
+            if fflags & 6: break
+            rotidx = i; fflags |= 2
+        elif t == 3:  # ANIFLAG32_SCL (10-bit xyz)
+            if fflags & 4: break
+            sclidx = i; fflags |= 4
+        i += 1
+
+    pos = [0., 0., 0.]; rot = [0., 0., 0.]; scl = [1., 1., 1.]
+
+    if posidx >= 0:
+        kp = keys_start + posidx * 4
+        kv = struct.unpack_from('<I', raw, kp)[0]
+        if (kv & 0x3) == 0:   # CODE (POSX, POSY, POSZ — 3 consecutive keys)
+            for j in range(3):
+                pos[j] = s24(struct.unpack_from('<I', raw, kp + j*4)[0]) / CODESCALE
+        else:                  # 10-bit packed
+            pos[0] = s10(kv >>  2) / POSSCALE
+            pos[1] = s10(kv >> 12) / POSSCALE
+            pos[2] = s10(kv >> 22) / POSSCALE
+
+    if rotidx >= 0:
+        kp = keys_start + rotidx * 4
+        kv = struct.unpack_from('<I', raw, kp)[0]
+        if (kv & 0x3) == 0:   # CODE (ROTX, ROTY, ROTZ)
+            for j in range(3):
+                rot[j] = s24(struct.unpack_from('<I', raw, kp + j*4)[0]) / CODESCALE
+        else:
+            rot[0] = s10(kv >>  2) / ROTSCALE
+            rot[1] = s10(kv >> 12) / ROTSCALE
+            rot[2] = s10(kv >> 22) / ROTSCALE
+
+    if sclidx >= 0:
+        kp = keys_start + sclidx * 4
+        kv = struct.unpack_from('<I', raw, kp)[0]
+        if (kv & 0x3) == 0:   # CODE (SCLX, SCLY, SCLZ)
+            for j in range(3):
+                scl[j] = s24(struct.unpack_from('<I', raw, kp + j*4)[0]) / CODESCALE
+        else:
+            scl[0] = s10(kv >>  2) / SCLSCALE
+            scl[1] = s10(kv >> 12) / SCLSCALE
+            scl[2] = s10(kv >> 22) / SCLSCALE
+
+    return pos, rot, scl
+
+
+def _parse_anim_states(raw: bytes, body_hdr_start: int, numstates: int) -> List[AnimState]:
+    """
+    Read animation state names from SImageryHeader.states[] array.
+    states[i] starts at body_hdr_start+8 + i*76.
+    First 32 bytes of each SImageryStateHeader is animname[32].
+    """
+    states = []
+    for i in range(numstates):
+        off = body_hdr_start + 8 + i * 76    # 8 = sizeof(imageryid)+sizeof(numstates)
+        if off + 32 > len(raw):
+            break
+        name = raw[off:off + 32].split(b'\x00')[0].decode('ascii', errors='replace').strip()
+        states.append(AnimState(name=name, index=i))
+    return states
+
+
+# --- New format decoder (I3D_3DIMAGEBODY2) ------------------------------------
+
+def _decode_new(raw: bytes, body_base: int, numverts_hint: int,
+                numfaces_hint: int, path: Path, anim_states: List[AnimState]
+                ) -> Optional[I3DGeometry]:
+    """
+    Decode S3DImageryBody (new format, I3D_3DIMAGEBODY2 set).
+
+    Key insight: face indices are LOCAL to each object's vertex range.
+    Global index = local_index + object.vertpos.
+    """
+    if body_base + 60 > len(raw):
+        return None
+
+    numverts   = struct.unpack_from('<i', raw, body_base + 12)[0]
+    numfaces   = struct.unpack_from('<i', raw, body_base + 20)[0]
+    numtex     = struct.unpack_from('<i', raw, body_base + 36)[0]
+    numobjects = struct.unpack_from('<i', raw, body_base + 44)[0]
+
+    if numverts <= 0 or numfaces <= 0:
+        return None
+
+    # --- Vertices: 3-level TOffset chain ---
+    # body+16 → array of OOD3DVERTEX (per state) → array of OD3DVERTEX (per frame)
+    # → actual D3DVERTEX data
+    l1 = _deref(raw, body_base + 16)
+    if not l1:
+        return None
+    l2 = _deref(raw, l1)
+    if not l2:
+        return None
+    verts_start = _deref(raw, l2)
+    if not verts_start:
+        return None
+
+    if verts_start + numverts * STRIDE > len(raw):
+        return None
+
+    # --- Faces: 1-level TOffset ---
+    faces_start = _deref(raw, body_base + 24)
+    if not faces_start:
+        return None
+    if faces_start + numfaces * 6 > len(raw):
+        return None
+
+    # --- Objects: 1-level TOffset ---
+    objs_start = _deref(raw, body_base + 48)
+    if not objs_start:
+        return None
+
+    # --- Read vertices ---
+    vertices, normals, uvs = _read_verts(raw, verts_start, numverts)
+
+    # --- Apply bind-pose bone transforms (state 0, frame 0) ---
+    # Vertices are stored in local bone space; each object's vertex range must be
+    # transformed by that bone's world matrix to produce model-space geometry.
+    #
+    # S3DImageryObject layout (48 bytes, compiler-padded):
+    #   [44:48] OS3DImageryObjectState states  → array of S3DImageryObjectState (12 bytes each)
+    # S3DImageryObjectState (12 bytes):
+    #   [0:4]  int parent        — parent object index (-1 = root)
+    #   [4:8]  int numanikeys
+    #   [8:12] OSAniKey32 anikeys — TOffset to SAniKey32 array
+    #
+    # World matrix = local_matrix × parent_world_matrix  (CalcObjectMatrix convention)
+
+    parents    = [-1] * numobjects
+    local_mats = [_mat_id() for _ in range(numobjects)]
+
+    for i in range(numobjects):
+        opos_i = objs_start + i * 48
+        if opos_i + 48 > len(raw):
+            continue
+        states_arr = _deref(raw, opos_i + 44)
+        if not states_arr or states_arr + 12 > len(raw):
+            continue
+        # State 0 entry (first of numstates entries, each 12 bytes)
+        parent_idx  = struct.unpack_from('<i', raw, states_arr    )[0]
+        numanikeys  = struct.unpack_from('<i', raw, states_arr + 4)[0]
+        anikeys_ptr = _deref(raw, states_arr + 8)
+
+        parents[i] = parent_idx
+        if anikeys_ptr and numanikeys > 0:
+            pos, rot, scl = _parse_frame0_anikey32(raw, anikeys_ptr, numanikeys)
+            local_mats[i] = _make_bone_mat(pos, rot, scl)
+
+    # Compute world matrices in topological order (root → leaves)
+    # Using iterative DFS to build parent-first ordering.
+    world_mats = [None] * numobjects
+
+    def _get_world(idx, depth=0):
+        if world_mats[idx] is not None:
+            return world_mats[idx]
+        if depth > numobjects:                      # cycle guard
+            world_mats[idx] = local_mats[idx]
+            return world_mats[idx]
+        p = parents[idx]
+        if 0 <= p < numobjects:
+            pw = _get_world(p, depth + 1)
+            world_mats[idx] = _mat_mul(local_mats[idx], pw)
+        else:
+            world_mats[idx] = local_mats[idx]
+        return world_mats[idx]
+
+    for i in range(numobjects):
+        _get_world(i)
+
+    # Apply world matrices to each object's vertex range
+    for i in range(numobjects):
+        opos_i  = objs_start + i * 48
+        if opos_i + 48 > len(raw):
+            continue
+        vertpos = struct.unpack_from('<H', raw, opos_i + 34)[0]
+        vertnum = struct.unpack_from('<H', raw, opos_i + 36)[0]
+        if vertnum == 0:
+            continue
+        wm = world_mats[i]
+        for vi in range(vertpos, vertpos + vertnum):
+            if vi < numverts:
+                vertices[vi] = _xform_pos(vertices[vi], wm)
+                if vi < len(normals):
+                    normals[vi] = _xform_nrm(normals[vi], wm)
+
+    # --- Read faces with local→global index conversion ---
+    # For each object: read its face range [facepos, facepos+facenum),
+    # add object.vertpos to each index to get global vertex index.
+    all_faces = []
+    for i in range(numobjects):
+        opos    = objs_start + i * 48
+        if opos + 48 > len(raw):
+            break
+        vertpos = struct.unpack_from('<H', raw, opos + 34)[0]
+        vertnum = struct.unpack_from('<H', raw, opos + 36)[0]
+        if vertnum == 0:
+            continue
+
+        # Follow textures TOffset to get S3DImageryObjectTexture array
+        tex_arr = _deref(raw, opos + 40)
+        if not tex_arr:
+            continue
+
+        # Iterate over texture groups: d=0 (no-tex) + d=1..numtex
+        for d in range(numtex + 1):
+            entry = tex_arr + d * 4
+            if entry + 4 > len(raw):
+                break
+            facepos, facenum = struct.unpack_from('<HH', raw, entry)
+            if facenum == 0:
+                continue
+            for j in range(facenum):
+                fp = faces_start + (facepos + j) * 6
+                if fp + 6 > len(raw):
+                    break
+                a, b, c = struct.unpack_from('<HHH', raw, fp)
+                ga = a + vertpos
+                gb = b + vertpos
+                gc = c + vertpos
+                if ga < numverts and gb < numverts and gc < numverts:
+                    all_faces.append((ga, gb, gc))
+
+    if not vertices or not all_faces:
+        return None
+
+    return I3DGeometry(
+        vertices=vertices, faces=all_faces, stride=STRIDE,
+        vert_count=numverts, idx_count=len(all_faces),
+        path=path, normals=normals, uvs=uvs,
+        anim_states=anim_states, state_index=0,
+        _raw_vbuf=raw, _vbuf_start=verts_start, _bind_vc=numverts,
+    )
+
+
+# --- Old format decoder (SOld3DImageryBody) -----------------------------------
+
+def _decode_old(raw: bytes, body_base: int, path: Path,
+                anim_states: List[AnimState]) -> Optional[I3DGeometry]:
+    """
+    Decode SOld3DImageryBody (no I3D_3DIMAGEBODY2 flag).
+    Used by magic effects and other simple objects (typically single-object quad meshes).
+    Face indices are global.
+    """
+    if body_base + 272 > len(raw):
+        return None
+
+    numverts = struct.unpack_from('<i', raw, body_base + 4)[0]
+    numfaces = struct.unpack_from('<i', raw, body_base + 264)[0]
+
+    if numverts <= 0 or numfaces <= 0:
+        return None
+
+    # Vertices: verts[0] is OFFSET at body+8 → frame OFFSET array → vertex data
+    l1 = _deref(raw, body_base + 8)
+    if not l1:
+        return None
+    verts_start = _deref(raw, l1)
+    if not verts_start:
+        return None
+
+    if verts_start + numverts * STRIDE > len(raw):
+        return None
+
+    # Faces: 1-level OFFSET at body+268
+    faces_start = _deref(raw, body_base + 268)
+    if not faces_start:
+        return None
+    if faces_start + numfaces * 6 > len(raw):
+        return None
+
+    vertices, normals, uvs = _read_verts(raw, verts_start, numverts)
+
+    faces = []
+    for i in range(numfaces):
+        fp = faces_start + i * 6
+        if fp + 6 > len(raw):
+            break
+        a, b, c = struct.unpack_from('<HHH', raw, fp)
+        if a < numverts and b < numverts and c < numverts:
+            faces.append((a, b, c))
+
+    if not vertices or not faces:
+        return None
+
+    return I3DGeometry(
+        vertices=vertices, faces=faces, stride=STRIDE,
+        vert_count=numverts, idx_count=len(faces),
+        path=path, normals=normals, uvs=uvs,
+        anim_states=anim_states, state_index=0,
+        _raw_vbuf=raw, _vbuf_start=verts_start, _bind_vc=numverts,
+    )
+
+
+# --- Embedded texture extractor -----------------------------------------------
+
+def decode_i3d_texture(path: Path) -> "Optional[object]":
+    """
+    Extract the first embedded DirectDraw texture from a new-format CGSR .i3d file.
+    Returns a PIL RGBA Image, or None if unavailable.
+
+    S3DImageryBody texture layout (confirmed from 3dimagebody.h):
+      body+36: int numtextures
+      body+40: OS3DImageryTexture textures  (TOffset)
+
+    S3DImageryTexture (120 bytes):
+      [0:108]  DDSURFACEDESC desc
+        +8 dwHeight, +12 dwWidth
+        +72 DDPIXELFORMAT (32 bytes):
+           +76 dwFlags  (DDPF_RGB=0x40, DDPF_PALETTEINDEXED8=0x20)
+           +84 dwRGBBitCount
+           +88/92/96 R/G/B masks
+      [108:112] OFFSET bits  → TOffset to array of frame OFFSETs
+      [112:116] OFFSET pals  → TOffset to X1R5G5B5 palette (or 0)
+      [116:120] int frames
+
+    Character models use 16-bit RGB565 (pf_flags=DDPF_RGB, bitcount=16).
+    """
+    try:
+        from PIL import Image
+    except ImportError:
+        return None
+    try:
+        raw = path.read_bytes()
+        if len(raw) < 24 or raw[:4] != CGSR_MAGIC:
+            return None
+
+        hdrsize   = struct.unpack_from('<I', raw, 16)[0]
+        body_base = 20 + hdrsize
+        if body_base + 44 > len(raw):
+            return None
+
+        if not (struct.unpack_from('<I', raw, body_base)[0] & I3D_3DIMAGEBODY2):
+            return None
+
+        numtex = struct.unpack_from('<i', raw, body_base + 36)[0]
+        if numtex <= 0:
+            return None
+
+        textures_p = _deref(raw, body_base + 40)
+        if not textures_p:
+            return None
+
+        DDPF_RGB            = 0x40
+        DDPF_PALETTEINDEXED8 = 0x20
+        TEX_STRIDE          = 120   # sizeof(S3DImageryTexture)
+
+        for tex_i in range(numtex):
+            tp = textures_p + tex_i * TEX_STRIDE
+            if tp + TEX_STRIDE > len(raw):
+                continue
+
+            dw_height = struct.unpack_from('<I', raw, tp +  8)[0]
+            dw_width  = struct.unpack_from('<I', raw, tp + 12)[0]
+            if dw_width == 0 or dw_height == 0:
+                continue
+
+            # DDPIXELFORMAT at DDSURFACEDESC+72
+            pf_flags    = struct.unpack_from('<I', raw, tp + 76)[0]
+            pf_bitcount = struct.unpack_from('<I', raw, tp + 84)[0]
+            pf_rmask    = struct.unpack_from('<I', raw, tp + 88)[0]
+            pf_gmask    = struct.unpack_from('<I', raw, tp + 92)[0]
+            pf_bmask    = struct.unpack_from('<I', raw, tp + 96)[0]
+            frames      = struct.unpack_from('<i', raw, tp + 116)[0]
+            if frames <= 0:
+                continue
+
+            bits_arr   = _deref(raw, tp + 108)
+            if not bits_arr:
+                continue
+            frame0_ptr = _deref(raw, bits_arr)
+            if not frame0_ptr:
+                continue
+
+            if (pf_flags & DDPF_RGB) and pf_bitcount == 16:
+                # 16-bit RGB (typically RGB565: R=0xF800, G=0x07E0, B=0x001F)
+                data_size = dw_width * dw_height * 2
+                if frame0_ptr + data_size > len(raw):
+                    continue
+
+                def _shift(mask):
+                    return (mask & -mask).bit_length() - 1 if mask else 0
+
+                def _bits(mask):
+                    return (mask >> _shift(mask)).bit_length() if mask else 0
+
+                rs, gs, bs = _shift(pf_rmask), _shift(pf_gmask), _shift(pf_bmask)
+                rb, gb, bb = _bits(pf_rmask),  _bits(pf_gmask),  _bits(pf_bmask)
+                rsc = 8 - rb; gsc = 8 - gb; bsc = 8 - bb
+
+                words = struct.unpack_from(f'<{dw_width * dw_height}H', raw, frame0_ptr)
+                pixels = [
+                    (((w >> rs) & (pf_rmask >> rs)) << rsc,
+                     ((w >> gs) & (pf_gmask >> gs)) << gsc,
+                     ((w >> bs) & (pf_bmask >> bs)) << bsc)
+                    for w in words
+                ]
+                img = Image.new('RGB', (dw_width, dw_height))
+                img.putdata(pixels)
+                return img.convert('RGBA')
+
+            elif pf_flags & DDPF_PALETTEINDEXED8:
+                # 8-bit palettized with X1R5G5B5 palette
+                pals_ptr = _deref(raw, tp + 112)
+                if not pals_ptr or pals_ptr + 512 > len(raw):
+                    continue
+                data_size = dw_width * dw_height
+                if frame0_ptr + data_size > len(raw):
+                    continue
+
+                pal = []
+                for pi in range(256):
+                    w = struct.unpack_from('<H', raw, pals_ptr + pi * 2)[0]
+                    pal.append((((w >> 10) & 0x1F) << 3,
+                                ((w >>  5) & 0x1F) << 3,
+                                 (w        & 0x1F) << 3,
+                                 0 if pi == 0 else 255))
+                pixels = [pal[b] for b in raw[frame0_ptr:frame0_ptr + data_size]]
+                img = Image.new('RGBA', (dw_width, dw_height))
+                img.putdata(pixels)
+                return img
+
+    except Exception:
+        pass
     return None
 
 
-# ─── Fallback decode: heuristic scan ──────────────────────────────────────────
+# --- Main decoder -------------------------------------------------------------
 
-def _try_scan(raw: bytes, payload_start: int, vc: int,
-              fc: int) -> Optional[Tuple[int, int, int, str]]:
+def decode_i3d_geometry(path: Path, state_index: int = 0) -> Optional[I3DGeometry]:
     """
-    Scan the payload for a valid face index block, then walk back to find
-    the vertex buffer and stride.
+    Parse a CGSR .i3d file and return its bind-pose geometry.
 
-    Steps by 6 bytes (face triplet alignment) to reduce false positives.
-    Returns (vstart, stride, fstart, "scan") or None.
-    """
-    n_face_bytes = fc * 6
-    best_result  = None
-    best_quality = -1
-
-    scan_end = len(raw) - n_face_bytes
-    # Step by 6: face triplets are 6-byte aligned within their block.
-    for fstart in range(payload_start + 56, scan_end, 6):
-        max_idx = _validate_face_block(raw, fstart, fc, vc)
-        if max_idx <= 1:
-            continue
-
-        # Try each stride to find a valid vertex buffer ending here.
-        for stride in VALID_STRIDES:
-            vstart = fstart - vc * stride
-            if vstart < payload_start:
-                continue
-            q = _validate_vertex_block(raw, vstart, vc, stride)
-            if q > 0:
-                total_quality = q * 1000 + max_idx
-                if total_quality > best_quality:
-                    best_quality = total_quality
-                    best_result  = (vstart, stride, fstart, "scan")
-                break  # accepted this fstart; keep scanning for better block
-
-    return best_result
-
-
-# ─── Full geometry decode ──────────────────────────────────────────────────────
-
-def decode_i3d_geometry(path: Path) -> Optional[I3DGeometry]:
-    """
-    Parse the geometry section of a CGSR .i3d file.
-    Returns I3DGeometry on success, or None if parsing fails.
+    Handles both S3DImageryBody (new) and SOld3DImageryBody (old) formats.
+    The state_index parameter is accepted for API compatibility but has no
+    effect — these models use skeletal (not morph) animation; bind pose only.
     """
     try:
         raw = path.read_bytes()
     except Exception:
         return None
 
-    if len(raw) < 32 or raw[:4] != CGSR_MAGIC:
+    if len(raw) < 24 or raw[:4] != CGSR_MAGIC:
         return None
 
-    # Payload starts at file_size - content_size_field
-    content_size  = struct.unpack_from('<I', raw, 8)[0]
-    payload_start = len(raw) - content_size
+    # FileResHdr: hdrsize at offset 16 (uint32)
+    hdrsize  = struct.unpack_from('<I', raw, 16)[0]
+    body_base = 20 + hdrsize
 
-    if payload_start < 0 or payload_start + 24 > len(raw):
+    if body_base + 8 > len(raw):
         return None
 
-    # Section table: vertex_count at [+12], face_count at [+20]
-    vc = struct.unpack_from('<I', raw, payload_start + 12)[0]
-    fc = struct.unpack_from('<I', raw, payload_start + 20)[0]
+    # SImageryHeader: numstates at offset 24 (int32)
+    numstates = struct.unpack_from('<i', raw, 24)[0]
+    if numstates < 0 or numstates > 4096:
+        numstates = 0
 
-    if vc == 0 or vc > 300_000 or fc == 0:
-        return None
+    anim_states = _parse_anim_states(raw, 20, numstates)
 
-    # ── Locate geometry: section table first, heuristic scan as fallback ──────
-    result = _try_section_table(raw, payload_start, vc, fc)
-    if result is None:
-        result = _try_scan(raw, payload_start, vc, fc)
-    if result is None:
-        return None
+    # Body flags
+    flags = struct.unpack_from('<I', raw, body_base)[0]
 
-    vstart, stride, fstart, method = result
-
-    # ── Parse vertices, normals, and UVs ─────────────────────────────────────
-    vertices : List[Tuple[float, float, float]] = []
-    normals  : List[Tuple[float, float, float]] = []
-    uvs      : List[Tuple[float, float]]        = []
-
-    has_normals = (stride >= 24)
-    has_uvs     = (stride >= 32)
-
-    for i in range(vc):
-        voff = vstart + i * stride
-        if voff + 12 > len(raw):
-            vertices.append((0.0, 0.0, 0.0))
-            normals.append((0.0, 1.0, 0.0))
-            uvs.append((0.0, 0.0))
-            continue
-
-        x, y, z = struct.unpack_from('<fff', raw, voff)
-        if _valid_coord(x) and _valid_coord(y) and _valid_coord(z):
-            vertices.append((x, y, z))
-        else:
-            vertices.append((0.0, 0.0, 0.0))
-
-        if has_normals and voff + 24 <= len(raw):
-            nx, ny, nz = struct.unpack_from('<fff', raw, voff + 12)
-            if _valid_normal(nx) and _valid_normal(ny) and _valid_normal(nz):
-                normals.append((nx, ny, nz))
-            else:
-                normals.append((0.0, 1.0, 0.0))
-        else:
-            normals.append((0.0, 1.0, 0.0))
-
-        if has_uvs and voff + 32 <= len(raw):
-            u, v = struct.unpack_from('<ff', raw, voff + 24)
-            if _valid_uv(u) and _valid_uv(v):
-                uvs.append((u, v))
-            else:
-                uvs.append((0.0, 0.0))
-        else:
-            uvs.append((0.0, 0.0))
-
-    # ── Parse face indices ────────────────────────────────────────────────────
-    faces: List[Tuple[int, int, int]] = []
-    for i in range(fc):
-        foff = fstart + i * 6
-        if foff + 6 > len(raw):
-            break
-        a, b, c = struct.unpack_from('<HHH', raw, foff)
-        if a < vc and b < vc and c < vc:
-            faces.append((a, b, c))
-
-    if not vertices:
-        return None
-
-    return I3DGeometry(
-        vertices      = vertices,
-        faces         = faces,
-        normals       = normals,
-        uvs           = uvs,
-        stride        = stride,
-        vert_count    = vc,
-        idx_count     = fc,
-        path          = path,
-        decode_method = method,
-    )
+    if flags & I3D_3DIMAGEBODY2:
+        return _decode_new(raw, body_base, 0, 0, path, anim_states)
+    else:
+        return _decode_old(raw, body_base, path, anim_states)
 
 
-# ─── OBJ exporter ─────────────────────────────────────────────────────────────
+# --- Animation state listing --------------------------------------------------
 
-def export_obj(geom: I3DGeometry, out_path: Path) -> bool:
+def list_anim_states(path: Path) -> List[AnimState]:
+    """Return animation state names for a .i3d file (geometry-free)."""
+    try:
+        raw = path.read_bytes()
+        if len(raw) < 28 or raw[:4] != CGSR_MAGIC:
+            return []
+        numstates = struct.unpack_from('<i', raw, 24)[0]
+        if numstates < 0 or numstates > 4096:
+            return []
+        return _parse_anim_states(raw, 20, numstates)
+    except Exception:
+        return []
+
+
+# --- load_state (bind-pose only — no morph animation in these files) ----------
+
+def load_state(geom: I3DGeometry, state_index: int, frame: int = 0) -> bool:
     """
-    Export I3DGeometry as a Wavefront OBJ file (with normals and UVs).
-    Returns True on success, False on error.
+    API compatibility stub. Revenant .i3d files use skeletal animation
+    (SAniKey32 bone transforms), not morph animation. The vertex buffer
+    contains only the bind pose. Always returns False (no state switching).
+    """
+    return False
+
+
+# --- OBJ exporter -------------------------------------------------------------
+
+def export_obj(geom: I3DGeometry, out_path: Path, texture=None) -> bool:
+    """
+    Export I3DGeometry as Wavefront OBJ with normals and UVs.
+
+    If `texture` is a PIL Image, also writes a sidecar .mtl and saves the
+    texture as a .png next to the OBJ so the material loads in Blender/viewers.
     """
     try:
-        has_uvs     = any(u != 0.0 or v != 0.0 for u, v in geom.uvs)
-        has_normals = any(nx != 0.0 or ny != 1.0 or nz != 0.0
-                          for nx, ny, nz in geom.normals)
+        has_n = len(geom.normals) == len(geom.vertices)
+        has_u = len(geom.uvs)     == len(geom.vertices)
+        stem  = out_path.stem
+
+        mtl_lines = None
+        tex_path  = None
+        if texture is not None and has_u:
+            tex_path = out_path.with_name(stem + "_tex.png")
+            mtl_path = out_path.with_suffix(".mtl")
+            mtl_lines = [
+                f"# RevEngine material for {stem}",
+                f"newmtl mat0",
+                f"Kd 1 1 1",
+                f"map_Kd {tex_path.name}",
+            ]
 
         lines = [
-            f"# RevEngine - Revenant (1999) i3d export",
-            f"# Source        : {geom.path.name}",
-            f"# Vertices      : {len(geom.vertices)}",
-            f"# Faces         : {len(geom.faces)}",
-            f"# Stride        : {geom.stride} bytes",
-            f"# Decode method : {geom.decode_method}",
-            f"# Has normals   : {has_normals}",
-            f"# Has UVs       : {has_uvs}",
-            f"",
-            f"o {geom.path.stem}",
-            f"",
+            "# RevEngine - Revenant (1999) i3d export",
+            f"# Source: {geom.path.name}  v={len(geom.vertices)}  f={len(geom.faces)}",
+            f"# States: {', '.join(s.name for s in geom.anim_states) or 'none'}",
+            "",
         ]
+        if mtl_lines:
+            lines.append(f"mtllib {stem}.mtl")
+        lines += ["", f"o {stem}", ""]
+        if mtl_lines:
+            lines.append("usemtl mat0")
 
         for x, y, z in geom.vertices:
             lines.append(f"v {x:.6f} {y:.6f} {z:.6f}")
         lines.append("")
-
-        if has_uvs:
+        if has_u:
             for u, v in geom.uvs:
-                lines.append(f"vt {u:.6f} {1.0 - v:.6f}")   # flip V for OBJ convention
+                lines.append(f"vt {u:.6f} {1.0 - v:.6f}")
             lines.append("")
-
-        if has_normals:
+        if has_n:
             for nx, ny, nz in geom.normals:
                 lines.append(f"vn {nx:.6f} {ny:.6f} {nz:.6f}")
             lines.append("")
-
-        if has_uvs and has_normals:
-            for a, b, c in geom.faces:
-                a1, b1, c1 = a + 1, b + 1, c + 1
-                lines.append(f"f {a1}/{a1}/{a1} {b1}/{b1}/{b1} {c1}/{c1}/{c1}")
-        elif has_normals:
-            for a, b, c in geom.faces:
-                a1, b1, c1 = a + 1, b + 1, c + 1
-                lines.append(f"f {a1}//{a1} {b1}//{b1} {c1}//{c1}")
-        elif has_uvs:
-            for a, b, c in geom.faces:
-                a1, b1, c1 = a + 1, b + 1, c + 1
-                lines.append(f"f {a1}/{a1} {b1}/{b1} {c1}/{c1}")
-        else:
-            for a, b, c in geom.faces:
-                lines.append(f"f {a + 1} {b + 1} {c + 1}")
+        for a, b, c in geom.faces:
+            ai, bi, ci = a + 1, b + 1, c + 1
+            if has_u and has_n:
+                lines.append(f"f {ai}/{ai}/{ai} {bi}/{bi}/{bi} {ci}/{ci}/{ci}")
+            elif has_u:
+                lines.append(f"f {ai}/{ai} {bi}/{bi} {ci}/{ci}")
+            elif has_n:
+                lines.append(f"f {ai}//{ai} {bi}//{bi} {ci}//{ci}")
+            else:
+                lines.append(f"f {ai} {bi} {ci}")
 
         out_path.parent.mkdir(parents=True, exist_ok=True)
         out_path.write_text("\n".join(lines), encoding="ascii")
+
+        if mtl_lines:
+            mtl_path.write_text("\n".join(mtl_lines), encoding="ascii")
+            texture.convert("RGB").save(str(tex_path))
+
+        return True
+    except Exception:
+        return False
+
+
+# --- glTF 2.0 exporter --------------------------------------------------------
+
+def export_gltf(geom: I3DGeometry, out_path: Path) -> bool:
+    """Export I3DGeometry as self-contained glTF 2.0 (base64 embedded)."""
+    try:
+        has_n = len(geom.normals) == len(geom.vertices)
+        has_u = len(geom.uvs)     == len(geom.vertices)
+        vc = len(geom.vertices); fc = len(geom.faces)
+
+        pos_data = bytearray()
+        min_p = [float('inf')] * 3; max_p = [float('-inf')] * 3
+        for x, y, z in geom.vertices:
+            pos_data += struct.pack('<fff', x, y, z)
+            for k, val in enumerate((x, y, z)):
+                if val < min_p[k]: min_p[k] = val
+                if val > max_p[k]: max_p[k] = val
+
+        nrm_data = bytearray()
+        if has_n:
+            for nx, ny, nz in geom.normals:
+                nrm_data += struct.pack('<fff', nx, ny, nz)
+
+        uv_data = bytearray()
+        if has_u:
+            for u, v in geom.uvs:
+                uv_data += struct.pack('<ff', u, v)
+
+        idx_data = bytearray()
+        for a, b, c in geom.faces:
+            idx_data += struct.pack('<HHH', a, b, c)
+        if len(idx_data) % 4:
+            idx_data += b'\x00' * (4 - len(idx_data) % 4)
+
+        combined = bytes(pos_data + nrm_data + uv_data + idx_data)
+        buf_uri  = "data:application/octet-stream;base64," + base64.b64encode(combined).decode()
+
+        offsets = [0, len(pos_data), len(pos_data) + len(nrm_data),
+                   len(pos_data) + len(nrm_data) + len(uv_data)]
+        bvs, acs, attrs = [], [], {}
+        bvs.append({"buffer": 0, "byteOffset": offsets[0], "byteLength": len(pos_data)})
+        acs.append({"bufferView": 0, "componentType": 5126, "count": vc, "type": "VEC3",
+                    "min": min_p, "max": max_p})
+        attrs["POSITION"] = 0
+        bv_i = ac_i = 1
+
+        if has_n:
+            bvs.append({"buffer": 0, "byteOffset": offsets[1], "byteLength": len(nrm_data)})
+            acs.append({"bufferView": bv_i, "componentType": 5126, "count": vc, "type": "VEC3"})
+            attrs["NORMAL"] = ac_i; bv_i += 1; ac_i += 1
+
+        if has_u:
+            bvs.append({"buffer": 0, "byteOffset": offsets[2], "byteLength": len(uv_data)})
+            acs.append({"bufferView": bv_i, "componentType": 5126, "count": vc, "type": "VEC2"})
+            attrs["TEXCOORD_0"] = ac_i; bv_i += 1; ac_i += 1
+
+        bvs.append({"buffer": 0, "byteOffset": offsets[3], "byteLength": fc * 6})
+        acs.append({"bufferView": bv_i, "componentType": 5123, "count": fc * 3, "type": "SCALAR"})
+
+        gltf = {
+            "asset": {"version": "2.0", "generator": "RevEngine"},
+            "scene": 0,
+            "scenes": [{"name": geom.path.stem, "nodes": [0]}],
+            "nodes":  [{"name": geom.path.stem, "mesh": 0,
+                        "extras": {"allStates": [s.name for s in geom.anim_states]}}],
+            "meshes": [{"name": geom.path.stem,
+                        "primitives": [{"attributes": attrs, "indices": ac_i, "mode": 4}]}],
+            "bufferViews": bvs,
+            "accessors":   acs,
+            "buffers": [{"uri": buf_uri, "byteLength": len(combined)}],
+        }
+        out_path.parent.mkdir(parents=True, exist_ok=True)
+        out_path.write_text(json.dumps(gltf, indent=2), encoding="utf-8")
         return True
     except Exception:
         return False
