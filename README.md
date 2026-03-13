@@ -19,7 +19,12 @@ Built on research from nuxdie, MathJazz, and benjcooley.
 | Spells | 🔄 WIP |
 | Scripts | 🔄 50% |
 
----
+---<img width="1391" height="906" alt="Screenshot 2026-03-13 012323" src="https://github.com/user-attachments/assets/5bb20886-8bc4-4798-9142-64883903bbfc" />
+<img width="1397" height="905" alt="Screenshot 2026-03-13 01223811" src="https://github.com/user-attachments/assets/dd3fae42-b7fe-40d8-9cae-486ab87f8f54" />
+<img width="1388" height="907" alt="Screenshot 2026-03-13 012208" src="https://github.com/user-attachments/assets/81eda89f-5208-4e03-8ed0-964a203d654f" />
+<img width="1388" height="907" alt="Screenshot 2026-03-13 012015" src="https://github.com/user-attachments/assets/9bef3922-9089-49d4-b37a-159ba4ab2351" />
+<img width="1396" height="904" alt="Screenshot 2026-03-11 153550" src="https://github.com/user-attachments/assets/cf8f824f-0bcb-45fd-984b-6de02b2f4773" />
+
 
 ## Setup
 
