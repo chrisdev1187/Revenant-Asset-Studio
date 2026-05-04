@@ -87,11 +87,10 @@ See `REVENANT_REVERSE_ENGINEERING.md` for full binary format documentation inclu
 
 ---
 
-## Thanks
+## Thank
 
 - [benjcooley/Revenant](https://github.com/benjcooley/Revenant) — C++ source reference
 - [IgorZyktin/Revenant](https://github.com/IgorZyktin/Revenant)
 - [depy/RevenantRE](https://github.com/depy/RevenantRE)
 
 ![CodeRabbit Pull Request Reviews](https://img.shields.io/coderabbit/prs/github/chrisdev1187/Revenant-Asset-Studio?utm_source=oss&utm_medium=github&utm_campaign=chrisdev1187%2FRevenant-Asset-Studio&labelColor=171717&color=FF570A&link=https%3A%2F%2Fcoderabbit.ai&label=CodeRabbit+Reviews)
-
