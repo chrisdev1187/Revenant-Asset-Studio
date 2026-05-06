@@ -11,7 +11,7 @@ Built on research from nuxdie, MathJazz, and benjcooley.
 | Feature | Status | Notes |
 |---|---|---|
 | World maps & zones | ✅ Full | All automaps stitched, PNG export via file dialog |
-| Sprite decode (.i2d) | ✅ 90% | Thumbnail browser, category filter, full decode |
+| Sprite decode (.i2d) | ✅ 99.8% | Thumbnail browser, category filter, full decode; LZ cross-chunk history resolved |
 | Character sheets | 🔄 50% | Parsed from char.def |
 | Equipment (Weapons/Armor) | ✅ Full | Icons, stats; correct palette transparency + exact name matching |
 | Spells | ✅ Full | Icon, talisman combos, variants, mana, damage type |
@@ -30,6 +30,24 @@ Built on research from nuxdie, MathJazz, and benjcooley.
 
 ## Changelog
 
+### 2026-05-06 — LZ cross-chunk history fix
+- **i2d.py — major sprite fix:** Resolved the long-standing LZ back-reference limitation.
+  1,859 of 2,224 compressed sprites had pixel regions that decoded as transparent because
+  LZ `dist` values caused the source address `di − dist − 4` to go negative (before the
+  start of the current chunk's buffer).
+
+  **Root cause (confirmed from `chunkcache.cpp` source):** `chunkbuffer[]` is a flat
+  `malloc(N × 4096)` C array. When the ASM's `sub edi, dist; sub edi, 4` produces a
+  negative offset, it reads from the previous slot — which holds the same sprite's
+  prior chunk (slots are allocated sequentially per sprite). The decoder had no
+  equivalent of this "previous slot."
+
+  **Fix:** `_decode_chunk` now accepts a `history` bytearray (concatenated decoded
+  chunk outputs for the current sprite). Negative LZ positions resolve into history
+  instead of returning 0. Empty chunks contribute 4096 zero bytes to preserve slot
+  alignment. Result: **2,623 / 2,627 sprites decode correctly (99.8%), zero regressions.**
+  Previously-transparent holes in LZ-referenced regions now render with correct colours.
+
 ### 2026-05-06
 - **World Map:** Save PNG now opens a file dialog instead of saving to a hardcoded path. Removed broken "Export All Zones" and "Diagnose" buttons.
 - **Equipment icons:** Fixed purple/magenta backgrounds — palette index 0 is now treated as transparent (RGBA). Fixed wrong icons caused by over-permissive name matching; now uses exact-first then shortest-prefix.
@@ -40,9 +58,6 @@ Built on research from nuxdie, MathJazz, and benjcooley.
 - **glTF export:** Fixed fragmentation — was exporting one mesh primitive per texture group (100+ objects in Blender); now exports a single primitive with a single material.
 - **glTF export:** Fixed missing rig — bones were children of the mesh node causing Blender to nest armature inside mesh; bones are now scene-level siblings of the mesh node.
 - **i2d.py:** Fixed LZ back-reference implementation — code was copying from the compressed payload stream; corrected to copy from the decompressed `chunk_buf` as the format spec requires.
-
-### Known limitation — sprite LZ cache references
-1,859 of 2,224 sprites use LZ back-references with `dist > 4096` that point into the game engine's **runtime chunk cache** — a global pool of previously-rendered sprite tiles maintained at runtime. These references cannot be resolved by a static decoder. Affected sprites decode correctly except for regions covered by those LZ tokens (which render transparent). The TN thumbnail always shows the correct low-resolution preview.
 
 ---
 
