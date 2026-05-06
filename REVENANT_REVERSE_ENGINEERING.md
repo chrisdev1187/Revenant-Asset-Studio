@@ -550,20 +550,28 @@ and checking if the remaining bytes divide evenly by vertex_count into a "nice"
 stride (12, 16, 20, 24, 28, 32, 36, 40, 48), the correct vertex layout can often
 be detected automatically. Fallback: assume stride=32 (most common D3D7 FVF).
 
-### Discovery 14: LZ Back-Reference Format (Confirmed from ChunkDecompress ASM)
+### Discovery 14: LZ Back-Reference Format (Confirmed from ChunkDecompress ASM + original source)
 The DH escape in `.i2d` chunk compression initiates a **4-byte token** (DH + 3 bytes):
 - `count` (1 byte) — number of bytes to copy (1–255)
-- `dist` (2 bytes, uint16 LE) — distance back in the **raw payload** from the DH byte
+- `dist` (2 bytes, uint16 LE) — look-back distance in the **decompressed output**
 
 ```
-p_dh = absolute offset of DH byte in payload
-src  = p_dh - dist
-copy payload[src : src+count] into chunk_buf
+src = di - dist - 4      (di = current output position in the 64×64 chunk_buf)
+copy chunk_buf[src : src+count]  into chunk_buf (then advance di)
 ```
 
-Back-references span the **whole payload buffer** (cross-chunk), not just the local chunk.
-A chunk-local 64×64 buffer is used during decode; non-zero pixels overwrite the canvas.
-Out-of-bounds src (src < 0) → transparent pixel (palette index 0).
+The **−4 bias is unconditional** — applied to every LZ token (confirmed from ASM: `sub edi, ebx; sub edi, 4`).
+The source is the **decompressed output buffer** (not the compressed input stream).
+
+**Cross-chunk history (key detail from chunkcache.cpp source):**
+`chunkbuffer[]` is a flat `malloc(N × 4096)` array. When `src < 0` the C code reads from the
+memory immediately before the current slot, which in practice holds the previously decoded
+chunk of the same sprite (slots are allocated sequentially per sprite). The decoder replicates
+this via a `history` bytearray that accumulates decoded chunk_buf outputs in decode order.
+`src < 0` and `history` exhausted → transparent (palette index 0).
+
+**Cache init:** Each slot is zeroed (`memset 0x00`) before `ChunkDecompress` begins.
+`src < 0` within chunk 0 (no previous slot) → transparent (correct — pre-zeroed memory).
 
 ### Discovery 15: Sprites Browser Missing Chars + Equip Categories
 The original `SPRITE_CATS` list hardcoded only environment categories (Forest, Town,
@@ -648,6 +656,34 @@ Fix applied in commit a65f858:
 - `_load_palette`: now reads 512 bytes (X1R5G5B5) instead of 768 bytes (RGB888)
 - `_decode_comp0`: same fix for TBitmapData palette path and 16-bit direct-pixel path
 - `.tn` files: only first 512 bytes read for palette (bytes 512-767 are ARGB/thumbnail data)
+
+### Discovery 24: LZ Cross-Chunk History (chunkcache.cpp source analysis)
+**Problem:** 1,859 of 2,224 compressed sprites have LZ `dist` values that cause
+`di - dist - 4 < 0`, pointing before the start of the current chunk's buffer.
+The previous decoder returned transparent (0) for these, causing pixel holes.
+
+**Root cause from source:** `chunkbuffer[]` in `chunkcache.cpp` is a flat
+`malloc(N × 4096)` byte array (not a circular buffer). `ChunkDecompress` is called
+with a pointer into this array. When `di - dist - 4 < 0`, the ASM's `sub edi, ebx; sub edi, 4`
+lands in the PREVIOUS slot — which holds the previously decoded chunk of the same sprite
+(sprites are decompressed into sequential slots).
+
+**Key facts confirmed from `chunkcache.h`/`chunkcache.cpp`:**
+- Each slot is zeroed to `0x00000000` before `ChunkDecompress` begins (the ASM `clear` step).
+- LZ references are intra-chunk by design but cross-slot in practice via C memory layout.
+- No cross-sprite sharing: the "previously-rendered sprite tiles" description was incorrect.
+  The references are to the SAME sprite's earlier chunks, not other sprites.
+- `dist = 0` is a valid reference (resolves to 4 bytes before current position).
+
+**Fix:** Added a `history: bytearray` parameter to `_decode_chunk`.
+The history accumulates each decoded `chunk_buf` in decode order, mirroring the
+sequential slot layout. Empty chunks (off == 0 in offset table) contribute 4096 zero bytes
+to maintain alignment. `lz_src < 0` looks into history at `len(history) + lz_src`;
+values still out-of-range return 0.
+
+**Result:** 0 regressions. 2623/2627 sprites continue to pass (same 4 legitimately
+broken files). Previously-transparent LZ-referenced regions now fill with the correct
+pixel data from earlier chunks of the same sprite.
 
 ---
 
@@ -1205,7 +1241,7 @@ Pipeline: install dgVoodoo2 DLLs → launch game under RenderDoc → F12 capture
 
 | Feature | Status | Notes |
 |---------|--------|-------|
-| LZ back-reference decode (DH escape in .i2d) | ⚠️ Best-effort | Assumed: (distance, length+1); format not confirmed from source |
+| LZ back-reference decode (DH escape in .i2d) | ✅ Complete | Formula confirmed from ChunkDecompress ASM; cross-chunk history implemented |
 | .i3d geometry decode (vertices, faces) | ⚠️ Heuristic | Stride detection; many models show wireframe; some fall back to point cloud |
 | UV / normal decode for i3d | ❌ Not implemented | Only x,y,z taken from each vertex; rest of stride ignored |
 | i3d → OBJ export | ✅ Complete | "Export OBJ" button in Models tab; Blender-compatible |

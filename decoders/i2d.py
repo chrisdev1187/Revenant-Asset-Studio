@@ -22,11 +22,18 @@ COMPRESSED PIXEL STREAM (from ChunkDecompress inline ASM)
 
   DH escape (LZ back-reference, 4-byte token total):
       DH + count + dist_lo + dist_hi
-      → copy `count` bytes from DECOMPRESSED output at (di − dist − 4)
+      → copy `count` bytes from decompressed data at (di − dist − 4)
          where di   = current output position in the 64×64 chunk_buf
          and   dist = uint16 little-endian (dist_lo | dist_hi<<8)
-      The −4 is a constant bias baked into the encoder (confirmed by depy/RevenantRE).
-      Source is the LOCAL chunk_buf (decompressed output), NOT the compressed input.
+      The −4 bias is unconditional (confirmed from ChunkDecompress ASM:
+        sub edi, ebx; sub edi, 4 — applied to every LZ token).
+      Source is the DECOMPRESSED output buffer, NOT the compressed input.
+
+      Cross-chunk references: when (di − dist − 4) < 0 the game's C runtime
+      reads from the previous slot in the flat chunkbuffer[] malloc array —
+      which holds the previously decoded chunk of the same sprite (slots are
+      allocated sequentially per sprite).  The decoder replicates this via
+      the `history` bytearray passed through _decode_chunk.
 
 PALETTE (confirmed from bitmapdata.h / SPalette struct)
   SPalette is embedded in the i2d at a self-relative OFFSET that lies 8 bytes
@@ -257,40 +264,52 @@ def _find_chunk_table(payload: bytes,
 #  CHUNK DECOMPRESSOR  (faithful port of chunkcache.cpp ChunkDecompress ASM)
 # ──────────────────────────────────────────────────────────────────────────────
 
+_EMPTY_CHUNK = bytes(CHUNK_PX * CHUNK_PX)   # 4096 zero bytes — reused for history padding
+
+
 def _decode_chunk(payload: bytes,
                   chunk_abs: int,
                   chunk_end: int,
                   pixels: bytearray,
                   stride: int,
                   x0: int, y0: int,
-                  img_w: int, img_h: int) -> None:
+                  img_w: int, img_h: int,
+                  history: Optional[bytearray] = None) -> bytearray:
     """
     Decode one compressed chunk and paint palette indices into `pixels`.
 
     Parameters
     ----------
-    payload    : full i2d payload (needed for cross-chunk LZ back-references)
+    payload    : full i2d payload
     chunk_abs  : absolute start of this chunk block in payload (incl. 4-byte ID)
     chunk_end  : exclusive end of chunk data in payload
     pixels     : flat bytearray, img_w × img_h palette indices
     stride     : == img_w
     x0, y0     : top-left pixel of this chunk on the canvas
     img_w/h    : canvas dimensions (for bounds checking)
+    history    : concatenated chunk_buf outputs of all previously decoded chunks
+                 for this sprite (mirrors the game's linear chunkbuffer[] array).
+                 LZ dist values that exceed the current chunk's decoded range
+                 look into this history.  None → transparent fallback (old behaviour).
+
+    Returns
+    -------
+    bytearray  : the decoded 64×64 chunk_buf; caller appends it to history.
     """
     if chunk_abs + 6 > len(payload):
-        return
+        return bytearray(CHUNK_PX * CHUNK_PX)
 
     chunk_end = min(chunk_end, len(payload))   # never read past payload end
     dl = payload[chunk_abs + 4]   # RLE escape byte
     dh = payload[chunk_abs + 5]   # LZ  escape byte
     i  = chunk_abs + 6            # absolute index into payload
 
-    # Chunk-local 64×64 palette-index buffer (all 0 = transparent initially)
+    # Chunk-local 64×64 palette-index buffer (zeroed — mirrors ASM clear step)
     chunk_buf = bytearray(CHUNK_PX * CHUNK_PX)
     di = 0    # linear output position in chunk_buf (0..4095)
     y  = 0    # row counter — incremented ONLY by EOL tokens (mirrors ASM ECX)
-              # The encoder guarantees exactly CHUNKWIDTH pixels of output per
-              # row before emitting EOL, so _put/_skip never need to wrap y.
+
+    hist_len = len(history) if history is not None else 0
 
     def _put(color: int) -> None:
         nonlocal di
@@ -335,8 +354,15 @@ def _decode_chunk(payload: bytes,
         elif b == dh:
             # ── LZ back-reference ─────────────────────────────────────────
             # Token: [DH][count][dist_lo][dist_hi]   (4 bytes total)
-            # Source is chunk_buf (decompressed output) at position di - dist - 4.
-            # The -4 bias is confirmed by depy/RevenantRE.
+            # Formula: src = di - dist - 4  (confirmed from ChunkDecompress ASM:
+            #   sub edi, ebx; sub edi, 4).  The -4 bias is unconditional.
+            #
+            # When src < 0 the reference extends before the start of this
+            # chunk's slot.  In the original C runtime the chunkbuffer[] array
+            # is a flat malloc block, so negative indices land in the PREVIOUS
+            # slot — which holds the previously decoded chunk of the same sprite
+            # (slots are allocated sequentially per sprite).  We replicate this
+            # with `history`: concatenated chunk_buf outputs of prior chunks.
             if i + 2 > chunk_end:
                 i = min(i + 3, chunk_end)
                 break
@@ -345,7 +371,15 @@ def _decode_chunk(payload: bytes,
 
             lz_src = di - dist - 4
             for k in range(count):
-                src_val = chunk_buf[lz_src + k] if 0 <= lz_src + k < CHUNK_PX * CHUNK_PX else 0
+                pos = lz_src + k
+                if 0 <= pos < CHUNK_PX * CHUNK_PX:
+                    src_val = chunk_buf[pos]
+                else:
+                    # Negative pos → look into history of previous chunks.
+                    # hist_pos = hist_len + pos  (pos is negative).
+                    # hist_pos < 0 means before the sprite's first chunk → 0.
+                    hist_pos = hist_len + pos
+                    src_val = history[hist_pos] if (history is not None and hist_pos >= 0) else 0
                 _put(src_val)
 
         else:
@@ -364,6 +398,8 @@ def _decode_chunk(payload: bytes,
             v = chunk_buf[cy * CHUNK_PX + cx]
             if v:
                 pixels[py * stride + px] = v
+
+    return chunk_buf
 
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -478,7 +514,7 @@ def _decode_comp0(raw: bytes, width: int, height: int,
         pixels   = bytearray(canvas_w * canvas_h)
 
         if n_chunks == 1:
-            # Single chunk: data starts at data8[12] (no offset table entry)
+            # Single chunk: no previous chunks → history not needed.
             chunk_abs = data8_start + 12
             chunk_end = data8_start + datasize
             if chunk_abs + 6 <= len(payload):
@@ -494,14 +530,18 @@ def _decode_comp0(raw: bytes, width: int, height: int,
                 for k in range(n_chunks)
             ]
 
+            history: bytearray = bytearray()
+
             for idx, off in enumerate(offsets):
                 if off == 0:
+                    history += _EMPTY_CHUNK
                     continue
                 col = idx % n_cols
                 row = idx // n_cols
                 field_pos = offsets_start + idx * 4
                 abs_off   = field_pos + off
                 if abs_off < 0 or abs_off + 6 >= len(payload):
+                    history += _EMPTY_CHUNK
                     continue
                 chunk_end = len(payload)
                 for next_idx in range(idx + 1, n_chunks):
@@ -512,10 +552,12 @@ def _decode_comp0(raw: bytes, width: int, height: int,
                         if cand > abs_off:
                             chunk_end = cand
                             break
-                _decode_chunk(payload, abs_off, chunk_end,
-                              pixels, canvas_w,
-                              col * CHUNK_PX, row * CHUNK_PX,
-                              canvas_w, canvas_h)
+                chunk_buf = _decode_chunk(payload, abs_off, chunk_end,
+                                          pixels, canvas_w,
+                                          col * CHUNK_PX, row * CHUNK_PX,
+                                          canvas_w, canvas_h,
+                                          history)
+                history += chunk_buf
 
         out     = Image.new('RGBA', (canvas_w, canvas_h), (0, 0, 0, 0))
         px_load = out.load()
@@ -622,7 +664,8 @@ def decode_i2d(path: Path, use_alpha: bool = True) -> Optional["Image"]:
 
     # ── Decode each chunk ────────────────────────────────────────────────────
     if n_chunks == 1:
-        # Single chunk: data starts directly at SChunkHeader+12 (no offset table)
+        # Single chunk: data starts directly at SChunkHeader+12 (no offset table).
+        # No previous chunks → history not needed.
         chunk_abs = offsets_start          # = ct_type_off + 12
         _decode_chunk(payload, chunk_abs, len(payload),
                       pixels, canvas_w, 0, 0, canvas_w, canvas_h)
@@ -635,15 +678,25 @@ def decode_i2d(path: Path, use_alpha: bool = True) -> Optional["Image"]:
             for k in range(n_chunks)
         ]
 
+        # history accumulates decoded chunk_buf data in decode order, mirroring
+        # the game's flat chunkbuffer[] C array so LZ back-refs that cross the
+        # current chunk boundary resolve into the correct previous-chunk data.
+        history: bytearray = bytearray()
+
         for idx, off in enumerate(offsets):
             if off == 0:
-                continue                         # empty / transparent tile
+                # Empty/transparent tile — no decompression, but the game still
+                # occupies a slot in chunkbuffer[] (with zeroed pixel data).
+                # Extend history so subsequent dist values remain aligned.
+                history += _EMPTY_CHUNK
+                continue
             col = idx % n_cols
             row = idx // n_cols
             # Self-relative: abs = field_position + entry_value
             field_pos = offsets_start + idx * 4
             abs_off   = field_pos + off
             if abs_off < 0 or abs_off + 6 >= len(payload):
+                history += _EMPTY_CHUNK
                 continue
 
             # Determine chunk data end: next non-zero chunk's abs position
@@ -657,12 +710,14 @@ def decode_i2d(path: Path, use_alpha: bool = True) -> Optional["Image"]:
                         chunk_end = cand
                         break
 
-            _decode_chunk(
+            chunk_buf = _decode_chunk(
                 payload, abs_off, chunk_end,
                 pixels, canvas_w,
                 col * CHUNK_PX, row * CHUNK_PX,
-                canvas_w, canvas_h
+                canvas_w, canvas_h,
+                history
             )
+            history += chunk_buf
 
     # ── Convert palette-index canvas → RGBA image ────────────────────────────
     out      = Image.new('RGBA', (canvas_w, canvas_h), (0, 0, 0, 0))
