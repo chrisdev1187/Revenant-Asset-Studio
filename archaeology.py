@@ -20,7 +20,7 @@ from pathlib import Path
 # ── Locate game files ─────────────────────────────────────────────────────────
 
 GAME_DIR     = Path("C:/GOG Games/Revenant")
-EXTRACT_DIR  = GAME_DIR / "_extracted"
+EXTRACT_DIR  = Path("C:/Users/chris/OneDrive/Desktop/Revengine/extracted")
 IMAGERY_DIR  = EXTRACT_DIR / "imagery" / "Imagery"
 SOURCE_DIR   = GAME_DIR / "Revenant-master"
 

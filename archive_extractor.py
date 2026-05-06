@@ -29,7 +29,7 @@ REVENANT_ARCHIVES = {
 }
 
 GAME_DIR = Path("C:/GOG Games/Revenant")
-EXTRACT_DIR = GAME_DIR / "_extracted"
+EXTRACT_DIR = Path("C:/Users/chris/OneDrive/Desktop/Revengine/extracted")
 
 
 @dataclass
@@ -63,6 +63,20 @@ def inspect_archive(archive_path: Path) -> Optional[ArchiveInfo]:
         return None
 
 
+def _safe_makedirs(path: Path) -> None:
+    """mkdir -p, renaming any file that blocks a path component."""
+    parts = path.parts
+    current = Path(parts[0])
+    for part in parts[1:]:
+        current = current / part
+        if current.exists() and not current.is_dir():
+            renamed = current.parent / (current.name + '.bin')
+            log.warning(f"Renaming file blocking directory slot: {current} -> {renamed}")
+            current.rename(renamed)
+        if not current.exists():
+            current.mkdir(exist_ok=True)
+
+
 def extract_archive(archive_path: Path, output_dir: Path,
                     overwrite: bool = False) -> tuple[int, int]:
     """
@@ -79,6 +93,9 @@ def extract_archive(archive_path: Path, output_dir: Path,
             total = len(entries)
 
             for i, entry in enumerate(entries, 1):
+                if entry.is_dir():
+                    continue
+
                 out_path = output_dir / entry.filename
 
                 if out_path.exists() and not overwrite:
@@ -90,7 +107,7 @@ def extract_archive(archive_path: Path, output_dir: Path,
                     pct = int(i / total * 100)
                     log.info(f"  [{pct:3d}%] {i}/{total} files...")
 
-                out_path.parent.mkdir(parents=True, exist_ok=True)
+                _safe_makedirs(out_path.parent)
                 with zf.open(entry) as src, open(out_path, 'wb') as dst:
                     dst.write(src.read())
                 extracted += 1

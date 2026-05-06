@@ -21,8 +21,16 @@ import re
 import threading
 import hashlib
 import math
+import logging
 from pathlib import Path
 from typing import Optional, List, Dict, Tuple
+
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s  %(levelname)-8s  %(name)s  %(message)s",
+    datefmt="%H:%M:%S",
+)
+log = logging.getLogger("RevEngine.Studio")
 
 # ─── Paths ───────────────────────────────────────────────────────────────────
 # Default: GOG install location. Override via --game-dir on the command line.
@@ -40,8 +48,8 @@ def _resolve_game_dir() -> Path:
     return _DEFAULT_GAME_DIR
 
 GAME_DIR    = _resolve_game_dir()
-EXTRACT_DIR = GAME_DIR / "_extracted"
-ENGINE_DIR  = GAME_DIR / "RevEngine"
+EXTRACT_DIR = Path("C:/Users/chris/OneDrive/Desktop/Revengine/extracted")
+ENGINE_DIR  = Path("C:/Users/chris/OneDrive/Desktop/Revengine")
 IMAGERY     = EXTRACT_DIR / "imagery"
 RESOURCES   = EXTRACT_DIR / "resources"
 AHKUILON    = EXTRACT_DIR / "Ahkuilon"
@@ -2042,11 +2050,13 @@ class ModelViewer3D(tk.Frame):
 
     def __init__(self, parent, **kwargs):
         super().__init__(parent, bg=BG_DARK, **kwargs)
-        self._verts   : List[tuple] = []
-        self._faces   : List[tuple] = []
-        self._normals : List[tuple] = []
-        self._uvs     : List[tuple] = []
-        self._texture  = None          # PIL.Image or None
+        self._verts            : List[tuple] = []
+        self._faces            : List[tuple] = []
+        self._normals          : List[tuple] = []
+        self._uvs              : List[tuple] = []
+        self._texture           = None   # first PIL.Image (kept for export compat)
+        self._textures         : list  = []   # all PIL.Images, indexed by face_tex_indices
+        self._face_tex_indices : List[int] = []
         self._photo_ref = None         # keep ImageTk.PhotoImage alive
         self._az     = 0.5
         self._el     = 0.1
@@ -2083,13 +2093,19 @@ class ModelViewer3D(tk.Frame):
         self._canvas.bind("<Configure>",       lambda e: self._redraw())
 
     def load(self, verts: list, faces: list, info: str = "",
-             normals: list = None, uvs: list = None, texture=None):
+             normals: list = None, uvs: list = None, texture=None,
+             textures: list = None, face_tex_indices: list = None):
         self._verts   = verts
         self._faces   = faces
         self._normals = normals or []
         self._uvs     = uvs or []
-        if texture is not None:
-            self._texture = texture
+        if textures is not None:
+            self._textures = textures
+            self._texture  = textures[0] if textures else None
+        elif texture is not None:
+            self._texture  = texture
+            self._textures = [texture]
+        self._face_tex_indices = face_tex_indices or []
         self._photo_ref = None
         self._az     = 0.5
         self._el     = 0.1
@@ -2109,13 +2125,13 @@ class ModelViewer3D(tk.Frame):
         self._redraw()
 
     @staticmethod
-    def load_texture_for(i3d_path) -> "Optional[object]":
+    def load_textures_for(i3d_path) -> list:
         """
-        Load a texture for an .i3d file.
+        Load all textures for an .i3d file.
         Priority:
-          1. Sidecar file (.bmp/.png/.tga alongside the .i3d)
-          2. Embedded DirectDraw texture extracted from the .i3d itself
-        Returns PIL Image (RGBA) or None.
+          1. Sidecar file (.bmp/.png/.tga) — returned as a single-element list
+          2. All embedded DirectDraw textures from the .i3d itself
+        Returns a list of PIL RGBA Images (may be empty).
         """
         try:
             from PIL import Image as _Image
@@ -2123,16 +2139,21 @@ class ModelViewer3D(tk.Frame):
             for ext in (".bmp", ".BMP", ".png", ".PNG", ".tga", ".TGA"):
                 candidate = p.with_suffix(ext)
                 if candidate.exists():
-                    return _Image.open(candidate).convert("RGBA")
+                    return [_Image.open(candidate).convert("RGBA")]
         except Exception:
             pass
-        # Fall back to embedded texture in the .i3d file
         try:
-            from decoders.i3d import decode_i3d_texture
-            return decode_i3d_texture(Path(i3d_path))
+            from decoders.i3d import decode_i3d_textures
+            return decode_i3d_textures(Path(i3d_path))
         except Exception:
             pass
-        return None
+        return []
+
+    @staticmethod
+    def load_texture_for(i3d_path) -> "Optional[object]":
+        """Single-texture backward-compat wrapper around load_textures_for."""
+        textures = ModelViewer3D.load_textures_for(i3d_path)
+        return textures[0] if textures else None
 
     def _drag_start(self, e):
         self._drag = (e.x, e.y, self._az, self._el)
@@ -2151,7 +2172,7 @@ class ModelViewer3D(tk.Frame):
 
     def _redraw(self):
         mode = self._mode_var.get()
-        if mode == "textured" and self._texture and self._uvs:
+        if mode == "textured" and self._textures and self._uvs:
             self._redraw_textured()
         else:
             self._redraw_shaded()
@@ -2302,13 +2323,28 @@ class ModelViewer3D(tk.Frame):
             self._redraw_shaded()
             return
 
-        if not self._verts or not self._faces or not self._texture or not self._uvs:
+        if not self._verts or not self._faces or not self._textures or not self._uvs:
             self._redraw_shaded()
             return
 
-        tex = self._texture.convert("RGB")
-        tw, th = tex.size
+        # Pre-tile each texture 3×3 so UV coordinates in [-1, 2] map cleanly.
+        # Many playable characters use tiling UVs (e.g. u=-1 to 1.25) for
+        # repeating armour/cloth patterns.  Hard clamping destroys those.
+        # With 3 tiles: _uvt(x) = (x + 1) / 3 maps [-1, 2] → [0, 1] inside
+        # the tiled texture, which covers the full observed UV range.
+        NTILES = 3
+        textures_tiled = []
+        for t in self._textures:
+            t_rgb = t.convert("RGB")
+            tw_b, th_b = t_rgb.size
+            tiled = PILImage.new("RGB", (tw_b * NTILES, th_b * NTILES))
+            for ty in range(NTILES):
+                for tx in range(NTILES):
+                    tiled.paste(t_rgb, (tx * tw_b, ty * th_b))
+            textures_tiled.append(tiled)
+
         uvs = self._uvs
+        face_tex = self._face_tex_indices
 
         # ── Same Z-up rotation pipeline as shaded ─────────────────────────────
         xs_r = [v[0] for v in self._verts]
@@ -2348,9 +2384,13 @@ class ModelViewer3D(tk.Frame):
 
         lx, ly, lz = 0.57, 0.74, 0.37
 
-        # ── Collect and depth-sort faces ──────────────────────────────────────
+        # ── Collect and depth-sort visible (front-facing) faces ───────────────
+        # _uvt maps raw UV x (range [-1, 2]) to [0, 1] inside the 3×3 tiled
+        # texture.  Clamp with tiny margin to handle IEEE rounding at borders.
+        def _uvt(x): return max(0.0, min(1.0, (x + 1.0) / NTILES))
+
         face_list = []
-        for a, b, fi in self._faces:
+        for face_idx, (a, b, fi) in enumerate(self._faces):
             if a >= len(pts) or b >= len(pts) or fi >= len(pts):
                 continue
             ax, ay, az_ = pts[a];  bx, by, bz_ = pts[b];  fx, fy, fz_ = pts[fi]
@@ -2366,24 +2406,35 @@ class ModelViewer3D(tk.Frame):
 
             nlen = math.sqrt(fnx*fnx+fny*fny+fnz*fnz) or 1.0
             fnx /= nlen; fny /= nlen; fnz /= nlen
-            front = fnz > 0.0
-            diff  = abs(fnx*lx + fny*ly + fnz*lz)
-            light = (0.25 + 0.75 * diff) if front else (0.06 + 0.14 * diff)
+
+            if fnz <= 0.0:   # backface cull
+                continue
+
+            diff  = fnx*lx + fny*ly + fnz*lz
+            light = 0.25 + 0.75 * max(0.0, diff)
             depth = (az_ + bz_ + fz_) / 3
 
-            ua = uvs[a][0]  if a  < len(uvs) else 0.; va = 1.-uvs[a][1]  if a  < len(uvs) else 0.
-            ub = uvs[b][0]  if b  < len(uvs) else 0.; vb = 1.-uvs[b][1]  if b  < len(uvs) else 0.
-            uf = uvs[fi][0] if fi < len(uvs) else 0.; vf = 1.-uvs[fi][1] if fi < len(uvs) else 0.
-            face_list.append((front, depth, ax, ay, bx, by, fx, fy,
-                               ua, va, ub, vb, uf, vf, light))
+            ua = _uvt(uvs[a][0])  if a  < len(uvs) else 1/3.; va = _uvt(uvs[a][1])  if a  < len(uvs) else 1/3.
+            ub = _uvt(uvs[b][0])  if b  < len(uvs) else 1/3.; vb = _uvt(uvs[b][1])  if b  < len(uvs) else 1/3.
+            uf = _uvt(uvs[fi][0]) if fi < len(uvs) else 1/3.; vf = _uvt(uvs[fi][1]) if fi < len(uvs) else 1/3.
 
-        face_list.sort(key=lambda f: (f[0], f[1]))   # back→front
+            t_idx = face_tex[face_idx] if face_idx < len(face_tex) else 0
+            face_list.append((depth, ax, ay, bx, by, fx, fy,
+                               ua, va, ub, vb, uf, vf, light, t_idx))
+
+        face_list.sort(key=lambda f: f[0])   # back→front (depth only, all front-facing)
 
         # ── Rasterize to PIL image with per-triangle affine UV mapping ────────
         img = PILImage.new("RGB", (cw, ch), "#07070f")
 
-        for (front, depth, ax, ay, bx, by, fx, fy,
-             ua, va, ub, vb, uf, vf, light) in face_list:
+        for (depth, ax, ay, bx, by, fx, fy,
+             ua, va, ub, vb, uf, vf, light, t_idx) in face_list:
+
+            # Select tiled texture for this face group
+            if t_idx < 0 or t_idx >= len(textures_tiled):
+                continue   # no-texture group — skip
+            tex = textures_tiled[t_idx]
+            tw, th = tex.size
 
             # Bounding box (clamped to canvas)
             xlo = max(0, int(min(ax, bx, fx)))
@@ -2394,9 +2445,7 @@ class ModelViewer3D(tk.Frame):
             if bbw <= 0 or bbh <= 0:
                 continue
 
-            # Inverse affine: for each dest pixel (x_bb, y_bb) in bounding box,
-            # compute source texture pixel (tu, tv).
-            # Solve: [A B C; D E F] such that [ax ay 1]*[A;B;C]=ua*tw etc.
+            # Inverse affine: dest (x_bb, y_bb) → source (tu, tv)
             det = ax*(by - fy) + bx*(fy - ay) + fx*(ay - by)
             if abs(det) < 0.5:
                 continue
@@ -2408,11 +2457,9 @@ class ModelViewer3D(tk.Frame):
             E = (va*(fx-bx) + vb*(ax-fx) + vf*(bx-ax)) * th / det
             F = (va*(bx*fy-fx*by) + vb*(fx*ay-ax*fy) + vf*(ax*by-bx*ay)) * th / det
 
-            # Adjust for bounding-box origin
             C2 = A * xlo + B * ylo + C
             F2 = D * xlo + E * ylo + F
 
-            # Texture patch via PIL affine (maps dest (x_bb,y_bb) → source (tu,tv))
             try:
                 patch = tex.transform((bbw, bbh), PILImage.AFFINE,
                                       data=(A, B, C2, D, E, F2),
@@ -2420,11 +2467,9 @@ class ModelViewer3D(tk.Frame):
             except Exception:
                 continue
 
-            # Apply lighting
             if light != 1.0:
                 patch = ImageEnhance.Brightness(patch).enhance(light)
 
-            # Triangle mask in bounding-box coordinates
             mask = PILImage.new("L", (bbw, bbh), 0)
             PILDraw.Draw(mask).polygon(
                 [(ax-xlo, ay-ylo), (bx-xlo, by-ylo), (fx-xlo, fy-ylo)], fill=255)
@@ -2786,21 +2831,29 @@ class ModelsTab(tk.Frame):
         self._viewer.load([], [], "Decoding…")
 
         def _worker(p=path):
+            log.info("Loading model: %s", p.name)
             try:
                 from decoders.i3d import decode_i3d_geometry
                 geom = decode_i3d_geometry(p)
-            except Exception:
+            except Exception as exc:
+                log.error("Geometry decode failed for %s: %s", p.name, exc)
                 geom = None
 
-            # Try sidecar texture (.bmp/.png/.tga) then embedded i3d texture
-            tex = ModelViewer3D.load_texture_for(p)
+            # Load all embedded textures (or sidecar)
+            textures = ModelViewer3D.load_textures_for(p)
+            tex = textures[0] if textures else None
 
             self._current_geom    = geom
             self._current_texture = tex
             if geom:
+                log.info("  %s: %d verts, %d faces, %d states, %d tex, rig=%s",
+                         p.name, len(geom.vertices), len(geom.faces),
+                         len(geom.anim_states), len(textures),
+                         f"{geom.rig.num_bones} bones" if geom.rig else "none")
                 has_uvs = len(geom.uvs) == len(geom.vertices)
                 has_nrm = len(geom.normals) == len(geom.vertices)
-                tex_tag = "  ·  +texture" if tex else ""
+                ntex = len(textures)
+                tex_tag = f"  ·  +{ntex} tex" if ntex else ""
                 extras  = (["+normals"] if has_nrm else []) + (["+UVs"] if has_uvs else [])
                 extras_str = ("  ·  " + " ".join(extras)) if extras else ""
                 n_states = len(geom.anim_states)
@@ -2815,9 +2868,10 @@ class ModelsTab(tk.Frame):
                     geom.vertices if geom else [],
                     geom.faces    if geom else [],
                     info,
-                    normals  = geom.normals if (geom and len(geom.normals)==len(geom.vertices)) else None,
-                    uvs      = geom.uvs     if (geom and len(geom.uvs)    ==len(geom.vertices)) else None,
-                    texture  = tex,
+                    normals          = geom.normals          if (geom and len(geom.normals)==len(geom.vertices)) else None,
+                    uvs              = geom.uvs              if (geom and len(geom.uvs)    ==len(geom.vertices)) else None,
+                    textures         = textures              if textures else None,
+                    face_tex_indices = geom.face_tex_indices if geom else None,
                 )
                 if self._state_cb.current() != 0:
                     self._state_cb.current(0)
@@ -2853,14 +2907,18 @@ class ModelsTab(tk.Frame):
             self._status.set("OBJ export failed")
 
     def _export_gltf(self):
-        """Save current model geometry as glTF 2.0 (with normals + UVs)."""
+        """Export current model as glTF 2.0 — skeleton + all animation clips + textures."""
         if self._current_geom is None:
             self._status.set("No geometry — select a model and wait for decode first")
             return
         geom = self._current_geom
+        if geom.rig is None:
+            self._status.set("No rig data — old-format model cannot be exported as glTF")
+            return
+
         default_name = geom.path.stem + ".gltf"
         out = filedialog.asksaveasfilename(
-            title="Export glTF 2.0",
+            title="Export glTF 2.0 (rigged + animated)",
             initialdir=str(Path.home() / "Desktop"),
             initialfile=default_name,
             defaultextension=".gltf",
@@ -2868,18 +2926,38 @@ class ModelsTab(tk.Frame):
         )
         if not out:
             return
-        from decoders.i3d import export_gltf
-        has_uvs = len(geom.uvs) == len(geom.vertices)
-        has_nrm = len(geom.normals) == len(geom.vertices)
-        if export_gltf(geom, Path(out)):
-            extras = []
-            if has_nrm: extras.append("normals")
-            if has_uvs: extras.append("UVs")
-            extras_str = " + " + " + ".join(extras) if extras else ""
-            self._status.set(f"glTF saved: {Path(out).name}  "
-                             f"({len(geom.vertices):,} verts, {len(geom.faces):,} faces{extras_str})")
-        else:
-            self._status.set("glTF export failed")
+
+        textures = getattr(self._viewer, '_textures', [])
+        out_path  = Path(out)
+        self._status.set(f"Exporting {geom.path.stem}… (baking animations, may take a moment)")
+
+        def _worker():
+            log.info("glTF export start: %s -> %s", geom.path.name, out_path)
+            try:
+                from decoders.gltf_export import export_gltf
+                ok = export_gltf(
+                    geom, textures, out_path,
+                    status_cb=lambda msg: (
+                        log.info("  %s", msg),
+                        self.after(0, lambda m=msg: self._status.set(m)),
+                    ),
+                )
+                n_anim = len(geom.anim_states)
+                nb     = geom.rig.num_bones
+                if ok:
+                    sz_kb = out_path.stat().st_size // 1024
+                    log.info("glTF export done: %s (%d KB)", out_path.name, sz_kb)
+                    msg = (f"glTF saved: {out_path.name}  "
+                           f"({len(geom.vertices):,} verts · {nb} bones · {n_anim} anim states)")
+                else:
+                    log.warning("glTF export returned False")
+                    msg = "glTF export failed"
+            except Exception as e:
+                log.exception("glTF export error for %s", geom.path.name)
+                msg = f"glTF export error: {e}"
+            self.after(0, lambda m=msg: self._status.set(m))
+
+        threading.Thread(target=_worker, daemon=True).start()
 
 
 # ═══════════════════════════════════════════════════════════════════════════════

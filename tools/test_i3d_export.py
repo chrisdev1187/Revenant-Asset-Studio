@@ -13,7 +13,7 @@ from decoders.i3d import decode_i3d_geometry, export_gltf, export_obj
 
 def main(argv: list[str]) -> int:
     # Default to a known i3d that exists in typical installs.
-    default_i3d = Path(r"..\_extracted\imagery\Imagery\Chars\acolyte.i3d")
+    default_i3d = Path(r"C:\Users\chris\OneDrive\Desktop\Revengine\extracted\imagery\Imagery\Chars\acolyte.i3d")
     i3d_path = Path(argv[1]) if len(argv) > 1 else default_i3d
 
     if not i3d_path.exists():

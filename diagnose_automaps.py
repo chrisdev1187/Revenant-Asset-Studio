@@ -13,12 +13,15 @@ from collections import defaultdict
 
 parser = argparse.ArgumentParser()
 parser.add_argument("--game-dir", default="C:/GOG Games/Revenant")
+parser.add_argument("--extract-dir", default="C:/Users/chris/OneDrive/Desktop/Revengine/extracted")
 args = parser.parse_args()
 
 game_dir    = Path(args.game_dir)
-automap_dir = game_dir / "_extracted" / "Ahkuilon" / "Automaps"
+extract_dir = Path(args.extract_dir)
+automap_dir = extract_dir / "Ahkuilon" / "Automaps"
 
 print(f"Game dir:    {game_dir}")
+print(f"Extract dir: {extract_dir}")
 print(f"Automap dir: {automap_dir}")
 print(f"Exists:      {automap_dir.exists()}")
 print()

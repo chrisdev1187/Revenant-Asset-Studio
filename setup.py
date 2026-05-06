@@ -35,8 +35,8 @@ def _parse_args():
 
 _ARGS = _parse_args()
 GAME_DIR    = Path(_ARGS.game_dir) if _ARGS.game_dir else _DEFAULT_GAME_DIR
-EXTRACT_DIR = GAME_DIR / "_extracted"
-ENGINE_DIR  = GAME_DIR / "RevEngine"
+EXTRACT_DIR = Path("C:/Users/chris/OneDrive/Desktop/Revengine/extracted")
+ENGINE_DIR  = Path("C:/Users/chris/OneDrive/Desktop/Revengine")
 
 REQUIRED_PACKAGES = [
     "Pillow>=10.0.0",

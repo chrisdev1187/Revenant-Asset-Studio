@@ -68,7 +68,7 @@ def main():
         stitch_fn   = _s
         zones_fn    = _g
         tiles_fn    = _t
-        renders_dir = Path(args.game_dir) / "RevEngine" / "test_renders"
+        renders_dir = Path("C:/Users/chris/OneDrive/Desktop/Revengine/test_renders")
     else:
         stitch_fn   = stitch_zone_map
         zones_fn    = get_available_zones

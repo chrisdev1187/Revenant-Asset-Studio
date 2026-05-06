@@ -2,10 +2,10 @@ import struct
 from pathlib import Path
 
 # Test 1: Read a .TN file from Forest category
-forest_dir = Path(r"C:\GOG Games\Revenant\_extracted\imagery\Imagery\Forest")
-equip_dir = Path(r"C:\GOG Games\Revenant\_extracted\imagery\Imagery\Equip")
-tn_forest = Path(r"C:\GOG Games\Revenant\_extracted\imagery\Thumbnails\Forest")
-tn_equip = Path(r"C:\GOG Games\Revenant\_extracted\imagery\Thumbnails\Equip")
+forest_dir = Path(r"C:\Users\chris\OneDrive\Desktop\Revengine\extracted\imagery\Imagery\Forest")
+equip_dir = Path(r"C:\Users\chris\OneDrive\Desktop\Revengine\extracted\imagery\Imagery\Equip")
+tn_forest = Path(r"C:\Users\chris\OneDrive\Desktop\Revengine\extracted\imagery\Thumbnails\Forest")
+tn_equip = Path(r"C:\Users\chris\OneDrive\Desktop\Revengine\extracted\imagery\Thumbnails\Equip")
 
 # Check sizes of first 10 .tn files in Forest and Equip thumbnails
 print("=== Forest .TN sizes ===")

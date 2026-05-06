@@ -80,9 +80,12 @@ import math
 import struct
 import json
 import base64
+import logging
 from pathlib import Path
 from dataclasses import dataclass, field
 from typing import Optional, List, Tuple
+
+log = logging.getLogger("RevEngine.i3d")
 
 CGSR_MAGIC = b'CGSR'
 STRIDE     = 32          # D3DVERTEX stride in bytes
@@ -105,21 +108,37 @@ class AnimState:
 
 
 @dataclass
+class I3DRig:
+    """Skeletal rig — populated only for new-format (I3D_3DIMAGEBODY2) models."""
+    num_bones    : int
+    bone_names   : List[str]         # object name[32] per bone
+    bone_parents : List[int]         # parent index, -1 = root
+    world_mats   : List[List[float]] # bind-pose (state0/frame0) 4×4 row-major per bone
+    vertex_bone  : List[int]         # owning bone index per vertex
+    _raw         : bytes = field(default_factory=bytes, repr=False)
+    _body_base   : int = 0
+    _objs_start  : int = 0
+    _numstates   : int = 0
+
+
+@dataclass
 class I3DGeometry:
-    vertices    : List[Tuple[float, float, float]]
-    faces       : List[Tuple[int,   int,   int  ]]
-    stride      : int
-    vert_count  : int
-    idx_count   : int
-    path        : Path
-    normals     : List[Tuple[float, float, float]] = field(default_factory=list)
-    uvs         : List[Tuple[float, float]]        = field(default_factory=list)
-    anim_states : List[AnimState]                  = field(default_factory=list)
-    state_index : int = 0
-    # Kept for API compatibility; bind-pose only (no morph animation in new format)
-    _raw_vbuf   : bytes = field(default_factory=bytes, repr=False)
-    _vbuf_start : int   = 0
-    _bind_vc    : int   = 0
+    vertices         : List[Tuple[float, float, float]]
+    faces            : List[Tuple[int,   int,   int  ]]
+    stride           : int
+    vert_count       : int
+    idx_count        : int
+    path             : Path
+    normals          : List[Tuple[float, float, float]] = field(default_factory=list)
+    uvs              : List[Tuple[float, float]]        = field(default_factory=list)
+    anim_states      : List[AnimState]                  = field(default_factory=list)
+    face_tex_indices : List[int]                        = field(default_factory=list)
+    rig              : Optional['I3DRig']               = None
+    state_index      : int = 0
+    _raw_vbuf        : bytes = field(default_factory=bytes, repr=False)
+    _vbuf_start      : int   = 0
+    _bind_vc         : int   = 0
+    _body_base       : int   = 0
 
 
 # --- Low-level helpers --------------------------------------------------------
@@ -317,26 +336,105 @@ def _parse_frame0_anikey32(raw: bytes, keys_start: int, numkeys: int):
     return pos, rot, scl
 
 
+def _parse_frameN_anikey32(raw: bytes, keys_start: int, numkeys: int,
+                            target_frame: int):
+    """Return (pos, rot, scl) for frame target_frame of an SAniKey32 stream.
+
+    SAniKey32 layout (no NEXTFRAME markers):
+      - Frame 0: CODE keys (t=0, codes 2-10) giving full-precision pos/rot/scl.
+      - Frames 1..N: packed keys (t=1 POS, t=2 ROT, t=3 SCL) follow the CODE
+        header grouped by channel.  rot_packed[k] → frame k+1.
+    """
+    POSSCALE = 4.0
+    ROTSCALE = 512.0 / math.pi
+    SCLSCALE = 64.0
+
+    def s10(n): n &= 0x3FF; return n - 1024 if n >= 512 else n
+
+    # Always parse frame 0 first to get base pose and locate header end.
+    pos0, rot0, scl0 = _parse_frame0_anikey32(raw, keys_start, numkeys)
+
+    if target_frame == 0:
+        return pos0, rot0, scl0
+
+    # Find where the CODE header ends (first non-CODE key).
+    header_len = 0
+    for i in range(numkeys):
+        kp = keys_start + i * 4
+        if kp + 4 > len(raw):
+            break
+        if (struct.unpack_from('<I', raw, kp)[0] & 0x3) != 0:
+            header_len = i
+            break
+    else:
+        header_len = numkeys   # all CODE keys — no per-frame packed data
+
+    # Collect per-channel packed keys after the header.
+    # Each channel's keys are stored consecutively: rot_keys[0]=frame1, [1]=frame2, …
+    pos_keys, rot_keys, scl_keys = [], [], []
+    for i in range(header_len, numkeys):
+        kp = keys_start + i * 4
+        if kp + 4 > len(raw):
+            break
+        kv = struct.unpack_from('<I', raw, kp)[0]
+        t  = kv & 0x3
+        if   t == 1: pos_keys.append(kv)
+        elif t == 2: rot_keys.append(kv)
+        elif t == 3: scl_keys.append(kv)
+
+    fi = target_frame - 1   # 0-based index into packed arrays
+
+    pos = list(pos0)
+    rot = list(rot0)
+    scl = list(scl0)
+
+    if fi < len(rot_keys):
+        kv = rot_keys[fi]
+        rot[0] = s10(kv >>  2) / ROTSCALE
+        rot[1] = s10(kv >> 12) / ROTSCALE
+        rot[2] = s10(kv >> 22) / ROTSCALE
+
+    if fi < len(pos_keys):
+        kv = pos_keys[fi]
+        pos[0] = s10(kv >>  2) / POSSCALE
+        pos[1] = s10(kv >> 12) / POSSCALE
+        pos[2] = s10(kv >> 22) / POSSCALE
+
+    if fi < len(scl_keys):
+        kv = scl_keys[fi]
+        scl[0] = s10(kv >>  2) / SCLSCALE
+        scl[1] = s10(kv >> 12) / SCLSCALE
+        scl[2] = s10(kv >> 22) / SCLSCALE
+
+    return pos, rot, scl
+
+
 def _parse_anim_states(raw: bytes, body_hdr_start: int, numstates: int) -> List[AnimState]:
     """
     Read animation state names from SImageryHeader.states[] array.
-    states[i] starts at body_hdr_start+8 + i*76.
-    First 32 bytes of each SImageryStateHeader is animname[32].
+    SImageryStateHeader (76 bytes each) at body_hdr_start+8 + i*76:
+      [0:32]  animname[32]
+      [32:36] OFFSET walkmap
+      [36:40] DWORD flags
+      [40:42] short aniflags
+      [42:44] short frames
     """
     states = []
     for i in range(numstates):
         off = body_hdr_start + 8 + i * 76    # 8 = sizeof(imageryid)+sizeof(numstates)
-        if off + 32 > len(raw):
+        if off + 44 > len(raw):
             break
-        name = raw[off:off + 32].split(b'\x00')[0].decode('ascii', errors='replace').strip()
-        states.append(AnimState(name=name, index=i))
+        name   = raw[off:off + 32].split(b'\x00')[0].decode('ascii', errors='replace').strip()
+        nframes = struct.unpack_from('<h', raw, off + 42)[0]
+        states.append(AnimState(name=name, index=i, nframes=max(0, nframes)))
     return states
 
 
 # --- New format decoder (I3D_3DIMAGEBODY2) ------------------------------------
 
 def _decode_new(raw: bytes, body_base: int, numverts_hint: int,
-                numfaces_hint: int, path: Path, anim_states: List[AnimState]
+                numfaces_hint: int, path: Path, anim_states: List[AnimState],
+                state_index: int = 0, frame: int = 0,
                 ) -> Optional[I3DGeometry]:
     """
     Decode S3DImageryBody (new format, I3D_3DIMAGEBODY2 set).
@@ -356,8 +454,8 @@ def _decode_new(raw: bytes, body_base: int, numverts_hint: int,
         return None
 
     # --- Vertices: 3-level TOffset chain ---
-    # body+16 → array of OOD3DVERTEX (per state) → array of OD3DVERTEX (per frame)
-    # → actual D3DVERTEX data
+    # OOOD3DVERTEX is a fixed triple indirection to the single bone-local vertex buffer.
+    # Animation is skeletal (SAniKey32 bone transforms), not morph — vertices are constant.
     l1 = _deref(raw, body_base + 16)
     if not l1:
         return None
@@ -386,7 +484,7 @@ def _decode_new(raw: bytes, body_base: int, numverts_hint: int,
     # --- Read vertices ---
     vertices, normals, uvs = _read_verts(raw, verts_start, numverts)
 
-    # --- Apply bind-pose bone transforms (state 0, frame 0) ---
+    # --- Apply bone transforms for (state_index, frame) ---
     # Vertices are stored in local bone space; each object's vertex range must be
     # transformed by that bone's world matrix to produce model-space geometry.
     #
@@ -407,16 +505,19 @@ def _decode_new(raw: bytes, body_base: int, numverts_hint: int,
         if opos_i + 48 > len(raw):
             continue
         states_arr = _deref(raw, opos_i + 44)
-        if not states_arr or states_arr + 12 > len(raw):
+        if not states_arr:
             continue
-        # State 0 entry (first of numstates entries, each 12 bytes)
-        parent_idx  = struct.unpack_from('<i', raw, states_arr    )[0]
-        numanikeys  = struct.unpack_from('<i', raw, states_arr + 4)[0]
-        anikeys_ptr = _deref(raw, states_arr + 8)
+        # Select the S3DImageryObjectState entry for state_index (each entry 12 bytes)
+        state_entry = states_arr + state_index * 12
+        if state_entry + 12 > len(raw):
+            continue
+        parent_idx  = struct.unpack_from('<i', raw, state_entry    )[0]
+        numanikeys  = struct.unpack_from('<i', raw, state_entry + 4)[0]
+        anikeys_ptr = _deref(raw, state_entry + 8)
 
         parents[i] = parent_idx
         if anikeys_ptr and numanikeys > 0:
-            pos, rot, scl = _parse_frame0_anikey32(raw, anikeys_ptr, numanikeys)
+            pos, rot, scl = _parse_frameN_anikey32(raw, anikeys_ptr, numanikeys, frame)
             local_mats[i] = _make_bone_mat(pos, rot, scl)
 
     # Compute world matrices in topological order (root → leaves)
@@ -459,7 +560,9 @@ def _decode_new(raw: bytes, body_base: int, numverts_hint: int,
     # --- Read faces with local→global index conversion ---
     # For each object: read its face range [facepos, facepos+facenum),
     # add object.vertpos to each index to get global vertex index.
-    all_faces = []
+    # d=0 → no-texture group (tex_index=-1), d=1..numtex → texture d-1.
+    all_faces       = []
+    all_tex_indices = []
     for i in range(numobjects):
         opos    = objs_start + i * 48
         if opos + 48 > len(raw):
@@ -482,6 +585,7 @@ def _decode_new(raw: bytes, body_base: int, numverts_hint: int,
             facepos, facenum = struct.unpack_from('<HH', raw, entry)
             if facenum == 0:
                 continue
+            tex_index = d - 1   # -1 = no texture, 0 = tex[0], 1 = tex[1], …
             for j in range(facenum):
                 fp = faces_start + (facepos + j) * 6
                 if fp + 6 > len(raw):
@@ -492,16 +596,56 @@ def _decode_new(raw: bytes, body_base: int, numverts_hint: int,
                 gc = c + vertpos
                 if ga < numverts and gb < numverts and gc < numverts:
                     all_faces.append((ga, gb, gc))
+                    all_tex_indices.append(tex_index)
 
     if not vertices or not all_faces:
         return None
+
+    # --- Build rig (only at bind pose — state 0, frame 0) ---
+    # Rig is geometry-independent and always reflects the bind pose regardless
+    # of which state/frame was decoded for the mesh.
+    rig = None
+    if state_index == 0 and frame == 0:
+        bone_names   = []
+        bone_parents_rig = []
+        world_mats_rig   = []
+        vertex_bone_rig  = [0] * numverts
+        for i in range(numobjects):
+            opos_i = objs_start + i * 48
+            if opos_i + 48 > len(raw):
+                bone_names.append(f"bone{i}")
+                bone_parents_rig.append(-1)
+                world_mats_rig.append(_mat_id())
+                continue
+            raw_name = raw[opos_i:opos_i + 32].split(b'\x00')[0]
+            bone_names.append(raw_name.decode('ascii', errors='replace').strip() or f"bone{i}")
+            bone_parents_rig.append(parents[i])
+            world_mats_rig.append(world_mats[i] if world_mats[i] is not None else _mat_id())
+            vertpos = struct.unpack_from('<H', raw, opos_i + 34)[0]
+            vertnum = struct.unpack_from('<H', raw, opos_i + 36)[0]
+            for vi in range(vertpos, min(vertpos + vertnum, numverts)):
+                vertex_bone_rig[vi] = i
+        numstates_hdr = struct.unpack_from('<i', raw, 24)[0]
+        rig = I3DRig(
+            num_bones    = numobjects,
+            bone_names   = bone_names,
+            bone_parents = bone_parents_rig,
+            world_mats   = world_mats_rig,
+            vertex_bone  = vertex_bone_rig,
+            _raw         = raw,
+            _body_base   = body_base,
+            _objs_start  = objs_start,
+            _numstates   = max(0, numstates_hdr),
+        )
 
     return I3DGeometry(
         vertices=vertices, faces=all_faces, stride=STRIDE,
         vert_count=numverts, idx_count=len(all_faces),
         path=path, normals=normals, uvs=uvs,
-        anim_states=anim_states, state_index=0,
+        anim_states=anim_states, face_tex_indices=all_tex_indices,
+        rig=rig, state_index=state_index,
         _raw_vbuf=raw, _vbuf_start=verts_start, _bind_vc=numverts,
+        _body_base=body_base,
     )
 
 
@@ -566,10 +710,10 @@ def _decode_old(raw: bytes, body_base: int, path: Path,
 
 # --- Embedded texture extractor -----------------------------------------------
 
-def decode_i3d_texture(path: Path) -> "Optional[object]":
+def decode_i3d_textures(path: Path) -> "List[object]":
     """
-    Extract the first embedded DirectDraw texture from a new-format CGSR .i3d file.
-    Returns a PIL RGBA Image, or None if unavailable.
+    Extract all embedded DirectDraw textures from a new-format CGSR .i3d file.
+    Returns a list of PIL RGBA Images (one per texture slot), empty list if none.
 
     S3DImageryBody texture layout (confirmed from 3dimagebody.h):
       body+36: int numtextures
@@ -591,40 +735,46 @@ def decode_i3d_texture(path: Path) -> "Optional[object]":
     try:
         from PIL import Image
     except ImportError:
-        return None
+        return []
     try:
         raw = path.read_bytes()
         if len(raw) < 24 or raw[:4] != CGSR_MAGIC:
-            return None
+            return []
 
         hdrsize   = struct.unpack_from('<I', raw, 16)[0]
         body_base = 20 + hdrsize
         if body_base + 44 > len(raw):
-            return None
+            return []
 
         if not (struct.unpack_from('<I', raw, body_base)[0] & I3D_3DIMAGEBODY2):
-            return None
+            return []
 
         numtex = struct.unpack_from('<i', raw, body_base + 36)[0]
         if numtex <= 0:
-            return None
+            return []
 
         textures_p = _deref(raw, body_base + 40)
         if not textures_p:
-            return None
+            return []
 
         DDPF_RGB            = 0x40
         DDPF_PALETTEINDEXED8 = 0x20
         TEX_STRIDE          = 120   # sizeof(S3DImageryTexture)
 
+        def _shift(mask): return (mask & -mask).bit_length() - 1 if mask else 0
+        def _bits(mask):  return (mask >> _shift(mask)).bit_length() if mask else 0
+
+        result = []
         for tex_i in range(numtex):
             tp = textures_p + tex_i * TEX_STRIDE
             if tp + TEX_STRIDE > len(raw):
+                result.append(None)
                 continue
 
             dw_height = struct.unpack_from('<I', raw, tp +  8)[0]
             dw_width  = struct.unpack_from('<I', raw, tp + 12)[0]
             if dw_width == 0 or dw_height == 0:
+                result.append(None)
                 continue
 
             # DDPIXELFORMAT at DDSURFACEDESC+72
@@ -635,107 +785,112 @@ def decode_i3d_texture(path: Path) -> "Optional[object]":
             pf_bmask    = struct.unpack_from('<I', raw, tp + 96)[0]
             frames      = struct.unpack_from('<i', raw, tp + 116)[0]
             if frames <= 0:
+                result.append(None)
                 continue
 
             bits_arr   = _deref(raw, tp + 108)
             if not bits_arr:
+                result.append(None)
                 continue
             frame0_ptr = _deref(raw, bits_arr)
             if not frame0_ptr:
+                result.append(None)
                 continue
 
+            img = None
             if (pf_flags & DDPF_RGB) and pf_bitcount == 16:
-                # 16-bit RGB (typically RGB565: R=0xF800, G=0x07E0, B=0x001F)
                 data_size = dw_width * dw_height * 2
-                if frame0_ptr + data_size > len(raw):
-                    continue
-
-                def _shift(mask):
-                    return (mask & -mask).bit_length() - 1 if mask else 0
-
-                def _bits(mask):
-                    return (mask >> _shift(mask)).bit_length() if mask else 0
-
-                rs, gs, bs = _shift(pf_rmask), _shift(pf_gmask), _shift(pf_bmask)
-                rb, gb, bb = _bits(pf_rmask),  _bits(pf_gmask),  _bits(pf_bmask)
-                rsc = 8 - rb; gsc = 8 - gb; bsc = 8 - bb
-
-                words = struct.unpack_from(f'<{dw_width * dw_height}H', raw, frame0_ptr)
-                pixels = [
-                    (((w >> rs) & (pf_rmask >> rs)) << rsc,
-                     ((w >> gs) & (pf_gmask >> gs)) << gsc,
-                     ((w >> bs) & (pf_bmask >> bs)) << bsc)
-                    for w in words
-                ]
-                img = Image.new('RGB', (dw_width, dw_height))
-                img.putdata(pixels)
-                return img.convert('RGBA')
+                if frame0_ptr + data_size <= len(raw):
+                    rs, gs, bs = _shift(pf_rmask), _shift(pf_gmask), _shift(pf_bmask)
+                    rb, gb, bb = _bits(pf_rmask),  _bits(pf_gmask),  _bits(pf_bmask)
+                    rsc = 8 - rb; gsc = 8 - gb; bsc = 8 - bb
+                    words = struct.unpack_from(f'<{dw_width * dw_height}H', raw, frame0_ptr)
+                    pixels = [
+                        (((w >> rs) & (pf_rmask >> rs)) << rsc,
+                         ((w >> gs) & (pf_gmask >> gs)) << gsc,
+                         ((w >> bs) & (pf_bmask >> bs)) << bsc)
+                        for w in words
+                    ]
+                    img = Image.new('RGB', (dw_width, dw_height))
+                    img.putdata(pixels)
+                    img = img.convert('RGBA')
 
             elif pf_flags & DDPF_PALETTEINDEXED8:
-                # 8-bit palettized with X1R5G5B5 palette
                 pals_ptr = _deref(raw, tp + 112)
-                if not pals_ptr or pals_ptr + 512 > len(raw):
-                    continue
                 data_size = dw_width * dw_height
-                if frame0_ptr + data_size > len(raw):
-                    continue
+                if pals_ptr and pals_ptr + 512 <= len(raw) and frame0_ptr + data_size <= len(raw):
+                    pal = []
+                    for pi in range(256):
+                        w = struct.unpack_from('<H', raw, pals_ptr + pi * 2)[0]
+                        pal.append((((w >> 10) & 0x1F) << 3,
+                                    ((w >>  5) & 0x1F) << 3,
+                                     (w        & 0x1F) << 3,
+                                     0 if pi == 0 else 255))
+                    pixels = [pal[b] for b in raw[frame0_ptr:frame0_ptr + data_size]]
+                    img = Image.new('RGBA', (dw_width, dw_height))
+                    img.putdata(pixels)
 
-                pal = []
-                for pi in range(256):
-                    w = struct.unpack_from('<H', raw, pals_ptr + pi * 2)[0]
-                    pal.append((((w >> 10) & 0x1F) << 3,
-                                ((w >>  5) & 0x1F) << 3,
-                                 (w        & 0x1F) << 3,
-                                 0 if pi == 0 else 255))
-                pixels = [pal[b] for b in raw[frame0_ptr:frame0_ptr + data_size]]
-                img = Image.new('RGBA', (dw_width, dw_height))
-                img.putdata(pixels)
-                return img
+            result.append(img)
+
+        return [img for img in result if img is not None]
 
     except Exception:
         pass
-    return None
+    return []
+
+
+def decode_i3d_texture(path: Path) -> "Optional[object]":
+    """Return the first embedded texture, or None. (Backward-compat wrapper.)"""
+    textures = decode_i3d_textures(path)
+    return textures[0] if textures else None
 
 
 # --- Main decoder -------------------------------------------------------------
 
-def decode_i3d_geometry(path: Path, state_index: int = 0) -> Optional[I3DGeometry]:
+def decode_i3d_geometry(path: Path, state_index: int = 0,
+                        frame: int = 0) -> Optional[I3DGeometry]:
     """
-    Parse a CGSR .i3d file and return its bind-pose geometry.
+    Parse a CGSR .i3d file and return geometry for the given state and frame.
 
     Handles both S3DImageryBody (new) and SOld3DImageryBody (old) formats.
-    The state_index parameter is accepted for API compatibility but has no
-    effect — these models use skeletal (not morph) animation; bind pose only.
+    Old format only supports state 0 / frame 0 (single static mesh).
     """
     try:
         raw = path.read_bytes()
-    except Exception:
+    except Exception as exc:
+        log.error("Cannot read %s: %s", path.name, exc)
         return None
 
     if len(raw) < 24 or raw[:4] != CGSR_MAGIC:
+        log.debug("Not a CGSR file: %s", path.name)
         return None
 
-    # FileResHdr: hdrsize at offset 16 (uint32)
-    hdrsize  = struct.unpack_from('<I', raw, 16)[0]
+    hdrsize   = struct.unpack_from('<I', raw, 16)[0]
     body_base = 20 + hdrsize
 
     if body_base + 8 > len(raw):
         return None
 
-    # SImageryHeader: numstates at offset 24 (int32)
     numstates = struct.unpack_from('<i', raw, 24)[0]
     if numstates < 0 or numstates > 4096:
         numstates = 0
 
     anim_states = _parse_anim_states(raw, 20, numstates)
 
-    # Body flags
     flags = struct.unpack_from('<I', raw, body_base)[0]
+    fmt   = "new (S3DImageryBody)" if (flags & I3D_3DIMAGEBODY2) else "old (SOld3DImageryBody)"
+    log.debug("Decoding %s  format=%s  states=%d  state_idx=%d  frame=%d",
+              path.name, fmt, numstates, state_index, frame)
 
     if flags & I3D_3DIMAGEBODY2:
-        return _decode_new(raw, body_base, 0, 0, path, anim_states)
+        geom = _decode_new(raw, body_base, 0, 0, path, anim_states,
+                           state_index=state_index, frame=frame)
     else:
-        return _decode_old(raw, body_base, path, anim_states)
+        geom = _decode_old(raw, body_base, path, anim_states)
+
+    if geom is None:
+        log.warning("Decode returned None for %s", path.name)
+    return geom
 
 
 # --- Animation state listing --------------------------------------------------
@@ -758,11 +913,37 @@ def list_anim_states(path: Path) -> List[AnimState]:
 
 def load_state(geom: I3DGeometry, state_index: int, frame: int = 0) -> bool:
     """
-    API compatibility stub. Revenant .i3d files use skeletal animation
-    (SAniKey32 bone transforms), not morph animation. The vertex buffer
-    contains only the bind pose. Always returns False (no state switching).
+    Mutate geom in-place to show the given animation state and frame.
+    Returns True on success, False if the state/frame is out of range or
+    the raw bytes are unavailable (old-format models).
     """
-    return False
+    raw       = geom._raw_vbuf
+    body_base = geom._body_base
+    if not raw or not body_base:
+        return False
+
+    flags = struct.unpack_from('<I', raw, body_base)[0]
+    if not (flags & I3D_3DIMAGEBODY2):
+        return False   # old format: single static mesh
+
+    numstates = struct.unpack_from('<i', raw, 24)[0]
+    if numstates <= 0 or state_index >= numstates:
+        return False
+
+    nframes = geom.anim_states[state_index].nframes if state_index < len(geom.anim_states) else 0
+    if nframes > 0 and frame >= nframes:
+        frame = frame % nframes
+
+    new_geom = _decode_new(raw, body_base, 0, 0, geom.path, geom.anim_states,
+                           state_index=state_index, frame=frame)
+    if new_geom is None:
+        return False
+
+    geom.vertices    = new_geom.vertices
+    geom.normals     = new_geom.normals
+    geom.uvs         = new_geom.uvs
+    geom.state_index = state_index
+    return True
 
 
 # --- OBJ exporter -------------------------------------------------------------
