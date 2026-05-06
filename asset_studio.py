@@ -94,6 +94,19 @@ ARMOR_SLOT = {2:"Chest", 3:"Head", 4:"Weapon", 5:"Shield",
               6:"Gauntlet", 7:"Ring1", 8:"Ring2",
               9:"Legs", 10:"Boots", 11:"Amulet"}
 
+TALISMAN_MAP = {
+    'A': 'Sun',   'B': 'Life',  'C': 'Ocean', 'D': 'Law',   'E': 'Soul',
+    'F': 'Stars', 'G': 'Death', 'H': 'Chaos', 'I': 'Sky',   'J': 'Earth',
+    'K': 'Ward',  'L': 'Moon',  'M': 'Rubert','N': 'Gilmor','O': 'Barry',
+}
+
+DAMAGE_TYPE_NAMES = {
+    'DT_NONE': 'None', 'DT_MISC': 'Misc', 'DT_HAND': 'Hand',
+    'DT_PUNCTURE': 'Puncture', 'DT_CUT': 'Cut', 'DT_CHOP': 'Chop',
+    'DT_BLUDGEON': 'Bludgeon', 'DT_MAGICAL': 'Magical',
+    'DT_BURN': 'Burn', 'DT_FREEZE': 'Freeze', 'DT_POISON': 'Poison',
+}
+
 
 # ═══════════════════════════════════════════════════════════════════════════════
 #  DATA PARSERS
@@ -250,29 +263,65 @@ def parse_armor_def() -> List[Dict]:
 
 
 def parse_spell_def() -> List[Dict]:
-    """Parse spell.def into a list of spell dicts."""
+    """Parse spell.def into a list of spell dicts with full VARIANT/talisman data."""
     text = _read_def(SPELL_DEF)
     spells = []
     pattern = re.compile(r'SPELL\s+"([^"]+)"\s*\nBEGIN(.*?)END', re.DOTALL)
+    # VARIANT "name", type, "talismans", "effect", mana, wait, min_d, max_d, ...
+    variant_re = re.compile(
+        r'VARIANT\s+"([^"]+)"\s*,\s*\w+\s*,\s*"([^"]*)"\s*,\s*"([^"]*)"\s*,\s*(\d+)'
+        r'(?:\s*,\s*(\d+)\s*,\s*(-?\d+)\s*,\s*(-?\d+))?',
+        re.DOTALL
+    )
     for m in pattern.finditer(text):
         name = m.group(1).strip()
         body = m.group(2)
 
-        def _tag(t):
-            rx = re.search(rf'\b{t}\b\s+(-?[\w\.]+)', body)
+        def _tag(t, b=body):
+            rx = re.search(rf'\b{t}\b\s+(-?[\w\.]+)', b)
             return rx.group(1) if rx else ""
+
+        desc_m = re.search(r'\bDESCRIPTION\s+"([^"]+)"', body)
+        description = desc_m.group(1).strip() if desc_m else ""
+
+        icon_m = re.search(r'\bICONNAME\s+"([^"]+)"', body)
+        icon_name = icon_m.group(1).strip() if icon_m else name
+
+        anim_m = re.search(r'\bANIMATION\s+"?([^"\n]+)"?', body)
+        animation = anim_m.group(1).strip() if anim_m else ""
+
+        dt_m = re.search(r'\bDAMAGETYPE\s+(\w+)', body)
+        damage_type = dt_m.group(1) if dt_m else ""
+
+        variants = []
+        for vm in variant_re.finditer(body):
+            talis_str  = vm.group(2).strip()
+            talis_names = [TALISMAN_MAP.get(c.upper(), c) for c in talis_str]
+            min_d = vm.group(6) or "—"
+            max_d = vm.group(7) or "—"
+            variants.append({
+                'name':        vm.group(1).strip(),
+                'talismans':   talis_str,
+                'talis_names': talis_names,
+                'effect':      vm.group(3).strip(),
+                'mana':        int(vm.group(4)),
+                'min_d':       min_d,
+                'max_d':       max_d,
+            })
+
+        mana = str(variants[0]['mana']) if variants else _tag("MANA") or "—"
 
         s = {
             "name":        name,
-            "mana":        _tag("MANA"),
+            "icon_name":   icon_name,
+            "mana":        mana,
             "damage":      _tag("DAMAGE"),
             "duration":    _tag("DURATION"),
-            "description": "",
+            "description": description,
+            "animation":   animation,
+            "damage_type": damage_type,
+            "variants":    variants,
         }
-        # grab text description (DESC tag or first comment)
-        desc_m = re.search(r'(?:DESCRIPTION|//)\s+(.+)', body)
-        if desc_m:
-            s["description"] = desc_m.group(1).strip()
         spells.append(s)
     return spells
 
@@ -647,22 +696,11 @@ class WorldMapTab(tk.Frame):
                   font=("Segoe UI", 10, "bold"), padx=10
                   ).pack(side="left", padx=4)
 
-        self._export_all_btn = tk.Button(
-                  bar, text="Export All Zones", command=self._export_all_zones,
-                  bg="#2a6040", fg="white", relief="flat",
-                  font=("Segoe UI", 10, "bold"), padx=10)
-        self._export_all_btn.pack(side="left", padx=4)
-
         self._extract_btn = tk.Button(
                   bar, text="⬇ Extract Modules", command=self._extract_missing_modules,
                   bg="#5a3070", fg="white", relief="flat",
                   font=("Segoe UI", 10, "bold"), padx=10)
         self._extract_btn.pack(side="left", padx=4)
-
-        tk.Button(bar, text="🔍 Diagnose", command=self._show_diagnose,
-                  bg="#304050", fg="white", relief="flat",
-                  font=("Segoe UI", 10, "bold"), padx=10
-                  ).pack(side="left", padx=4)
 
         # Zoom controls
         tk.Label(bar, text="Zoom:", bg=BG_DARK, fg=FG_DIM,
@@ -871,15 +909,26 @@ class WorldMapTab(tk.Frame):
             f"{module} zone {zone} stitched — {len(tiles)} tiles, {img.width}x{img.height}px")
 
     def _save_current(self):
-        """Save the currently displayed zone map as a PNG."""
+        """Save the full-resolution stitched zone map as PNG (file dialog)."""
         if self._img is None:
             self._status.set("Nothing to save — stitch a zone first.")
             return
         module, zone = self._current_zone_key()
         RENDERS_DIR.mkdir(parents=True, exist_ok=True)
-        out = RENDERS_DIR / f"world_map_{module}_zone{zone}.png"
+        default_name = f"world_map_{module}_zone{zone}.png"
+        out = filedialog.asksaveasfilename(
+            title="Save Zone Map as PNG",
+            initialdir=str(RENDERS_DIR),
+            initialfile=default_name,
+            defaultextension=".png",
+            filetypes=[("PNG Image", "*.png"), ("All files", "*.*")],
+        )
+        if not out:
+            return
         self._img.save(out)
-        self._status.set(f"Saved: {out}")
+        self._status.set(
+            f"Saved: {Path(out).name}  ({self._img.width}×{self._img.height}px)"
+        )
 
     def _export_all_zones(self):
         """Stitch and save every available zone to PNG in the renders folder."""
@@ -1008,10 +1057,6 @@ class WorldMapTab(tk.Frame):
             w("  (town/orc-camp automaps live in Modules/*.rvm)", "dim")
 
         txt.configure(state="disabled")
-
-
-        self._zoom = z
-        self._refresh_display()
 
     def _refresh_display(self):
         if self._img is None or not HAS_PIL:
@@ -1688,40 +1733,92 @@ class EquipmentTab(tk.Frame):
         self._load_equip_tn(name.lower(), self._arm_img_lbl)
 
     def _load_equip_tn(self, name: str, lbl: tk.Label):
-        """Try to load .tn thumbnail from Thumbnails/Equip/ folder."""
+        """Load .tn thumbnail for equipment: exact match first, then prefix."""
         if not HAS_PIL:
             return
         equip_dir = THUMBNAILS / "Equip"
         if not equip_dir.exists():
+            lbl.config(image="")
             return
-        norm = name.replace(" ", "").replace("-", "")
+        norm = name.lower().replace(" ", "").replace("-", "").replace("'", "")
+        best: Optional[Path] = None
+        best_score = 999
         for f in equip_dir.iterdir():
-            fn = f.stem.lower().replace(" ", "").replace("-", "")
-            if f.suffix.lower() == '.tn' and (fn == norm or norm in fn or fn in norm):
-                try:
-                    raw = f.read_bytes()
-                    px  = _decode_tn_pixels(raw)
-                    if px is not None:
-                        img = Image.frombytes('RGB', (16, 16), px)
-                        img = img.resize((64, 64), Image.NEAREST)
-                        ph  = ImageTk.PhotoImage(img)
-                        lbl.config(image=ph)
-                        lbl._photo = ph
-                    return
-                except Exception:
-                    pass
+            if f.suffix.lower() != '.tn':
+                continue
+            fn = f.stem.lower().replace(" ", "").replace("-", "").replace("'", "")
+            if fn == norm:
+                best = f
+                break
+            # prefix match — prefer shorter distance
+            if fn.startswith(norm) or norm.startswith(fn):
+                score = abs(len(fn) - len(norm))
+                if score < best_score:
+                    best = f
+                    best_score = score
+        if best is None:
+            lbl.config(image="")
+            return
+        try:
+            raw = best.read_bytes()
+            px  = _decode_tn_pixels(raw)
+            if px is not None:
+                rgba = Image.frombytes('RGBA', (16, 16), px)
+                bg   = Image.new('RGB', (16, 16), (30, 42, 69))
+                bg.paste(rgba, mask=rgba.split()[3])
+                img  = bg.resize((64, 64), Image.NEAREST)
+                ph   = ImageTk.PhotoImage(img)
+                lbl.config(image=ph)
+                lbl._photo = ph
+                return
+        except Exception:
+            pass
         lbl.config(image="")
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
-#  SPELLS TAB
+#  SPELLS TAB  (reworked: icons + talisman combos + variants)
 # ═══════════════════════════════════════════════════════════════════════════════
+
+def _load_spell_icon(icon_name: str, size: int = 48) -> Optional["Image.Image"]:
+    """Load spell icon from Magic/ thumbnails directory."""
+    magic_dir = THUMBNAILS / "Magic"
+    if not magic_dir.exists():
+        return None
+    norm = icon_name.lower().replace(" ", "").replace("-", "")
+    for f in magic_dir.iterdir():
+        if f.suffix.lower() == '.tn':
+            fn = f.stem.lower().replace(" ", "").replace("-", "")
+            if fn == norm:
+                return _load_tn_image(f, size)
+    return None
+
+
+def _load_talisman_icons(size: int = 24) -> Dict[str, Optional["ImageTk.PhotoImage"]]:
+    """Load all talisman icons from Magic/ thumbnails, keyed by talisman name."""
+    result: Dict[str, Optional["ImageTk.PhotoImage"]] = {}
+    if not HAS_PIL:
+        return result
+    magic_dir = THUMBNAILS / "Magic"
+    if not magic_dir.exists():
+        return result
+    for name in TALISMAN_MAP.values():
+        fn = magic_dir / f"{name.lower()}.tn"
+        if fn.exists():
+            img = _load_tn_image(fn, size)
+            if img:
+                result[name] = ImageTk.PhotoImage(img)
+    return result
+
 
 class SpellsTab(tk.Frame):
     def __init__(self, parent, status: StatusBar):
         super().__init__(parent, bg=BG_MID)
-        self._status = status
-        self._spells = []
+        self._status   = status
+        self._spells   = []
+        self._talis_ph : Dict[str, "ImageTk.PhotoImage"] = {}
+        self._spell_ph : Dict[str, "ImageTk.PhotoImage"] = {}
+        self._variant_talis_widgets: list = []   # kept alive
         self._build_ui()
         self.after(400, self._load_all)
 
@@ -1730,54 +1827,73 @@ class SpellsTab(tk.Frame):
         bar.pack(fill="x")
         self._flt_var = tk.StringVar()
         tk.Label(bar, text="Filter:", bg=BG_DARK, fg=FG_DIM,
-                 font=("Segoe UI", 10)).pack(side="left", padx=(10,4))
+                 font=("Segoe UI", 10)).pack(side="left", padx=(10, 4))
         tk.Entry(bar, textvariable=self._flt_var,
-                  bg=BG_PANEL, fg=FG_TEXT, insertbackground=FG_TEXT,
-                  font=("Segoe UI", 10), relief="flat", width=20
-                  ).pack(side="left", padx=4)
+                 bg=BG_PANEL, fg=FG_TEXT, insertbackground=FG_TEXT,
+                 font=("Segoe UI", 10), relief="flat", width=20
+                 ).pack(side="left", padx=4)
         self._flt_var.trace_add("write", self._filter)
         self._count_lbl = tk.Label(bar, text="", bg=BG_DARK, fg=FG_DIM,
-                                    font=("Segoe UI", 9))
+                                   font=("Segoe UI", 9))
         self._count_lbl.pack(side="right", padx=12)
 
         pane = tk.PanedWindow(self, orient="horizontal", bg=BG_DARK,
-                               sashwidth=6, sashrelief="flat")
+                              sashwidth=6, sashrelief="flat")
         pane.pack(fill="both", expand=True)
 
-        # List
+        # ── Left: compact spell list ──────────────────────────────────────────
         lf = tk.Frame(pane, bg=BG_MID)
-        pane.add(lf, minsize=260)
-        cols = ("name","mana","damage")
+        pane.add(lf, minsize=240)
+        cols = ("name", "mana", "type")
         self._tv = ttk.Treeview(lf, columns=cols, show="headings",
-                                  selectmode="browse")
-        self._tv.heading("name",   text="Spell",  anchor="w")
-        self._tv.heading("mana",   text="Mana",   anchor="center")
-        self._tv.heading("damage", text="Damage", anchor="center")
-        self._tv.column("name",   width=200, stretch=True)
-        self._tv.column("mana",   width=60,  stretch=False, anchor="center")
-        self._tv.column("damage", width=70,  stretch=False, anchor="center")
+                                selectmode="browse")
+        self._tv.heading("name", text="Spell",  anchor="w")
+        self._tv.heading("mana", text="Mana",   anchor="center")
+        self._tv.heading("type", text="Dmg Type", anchor="w")
+        self._tv.column("name", width=180, stretch=True)
+        self._tv.column("mana", width=50,  stretch=False, anchor="center")
+        self._tv.column("type", width=80,  stretch=False)
         sb = ttk.Scrollbar(lf, orient="vertical", command=self._tv.yview)
         self._tv.configure(yscrollcommand=sb.set)
         sb.pack(side="right", fill="y")
         self._tv.pack(fill="both", expand=True)
         self._tv.bind("<<TreeviewSelect>>", self._on_select)
 
-        # Detail
-        det = tk.Frame(pane, bg=BG_PANEL, padx=12, pady=12)
-        pane.add(det, minsize=320)
-        tk.Label(det, text="SPELL DETAILS", bg=BG_PANEL, fg=RED,
-                 font=("Segoe UI", 11, "bold")).pack(anchor="w")
-        ttk.Separator(det).pack(fill="x", pady=6)
-        self._det_text = tk.Text(det, bg=BG_PANEL, fg=FG_TEXT,
-                                  font=("Consolas", 9), relief="flat",
-                                  state="disabled", wrap="word")
-        self._det_text.pack(fill="both", expand=True)
-        self._det_text.tag_configure("h",  foreground=RED,    font=("Segoe UI",10,"bold"))
-        self._det_text.tag_configure("kv", foreground=ACCENT2,font=("Segoe UI", 9))
+        # ── Right: rich detail card ───────────────────────────────────────────
+        right = tk.Frame(pane, bg=BG_PANEL)
+        pane.add(right, minsize=380)
+
+        # Header row: icon + name
+        hdr = tk.Frame(right, bg=BG_PANEL, padx=10, pady=8)
+        hdr.pack(fill="x")
+        self._icon_lbl = tk.Label(hdr, bg=BG_PANEL)
+        self._icon_lbl.pack(side="left", padx=(0, 10))
+        name_frame = tk.Frame(hdr, bg=BG_PANEL)
+        name_frame.pack(side="left", fill="x", expand=True)
+        self._spell_name_lbl = tk.Label(name_frame, text="Select a spell",
+                                        bg=BG_PANEL, fg=FG_TEXT,
+                                        font=("Segoe UI", 14, "bold"),
+                                        anchor="w", wraplength=280)
+        self._spell_name_lbl.pack(anchor="w")
+        self._spell_desc_lbl = tk.Label(name_frame, text="",
+                                        bg=BG_PANEL, fg=FG_DIM,
+                                        font=("Segoe UI", 9), wraplength=280,
+                                        justify="left", anchor="w")
+        self._spell_desc_lbl.pack(anchor="w", pady=(2, 0))
+
+        ttk.Separator(right).pack(fill="x")
+
+        # Scrollable detail body
+        scroll_frame = ScrollFrame(right, bg=BG_PANEL)
+        scroll_frame.pack(fill="both", expand=True)
+        self._body = scroll_frame.inner
+        self._body.configure(bg=BG_PANEL)
 
     def _load_all(self):
-        self._status.set("Parsing spell.def...")
+        self._status.set("Parsing spell.def…")
         self._spells = parse_spell_def()
+        if HAS_PIL:
+            self._talis_ph = _load_talisman_icons(size=28)
         self._populate(self._spells)
         self._count_lbl.config(text=f"{len(self._spells)} spells")
         self._status.set(f"Spells loaded: {len(self._spells)}")
@@ -1785,13 +1901,14 @@ class SpellsTab(tk.Frame):
     def _populate(self, data: List[Dict]):
         self._tv.delete(*self._tv.get_children())
         for s in data:
+            dt = DAMAGE_TYPE_NAMES.get(s.get("damage_type", ""), s.get("damage_type", "—"))
             self._tv.insert("", "end",
-                values=(s["name"], s.get("mana","—"), s.get("damage","—")))
+                values=(s["name"], s.get("mana", "—"), dt or "—"))
 
     def _filter(self, *_):
         flt = self._flt_var.get().strip().lower()
-        filtered = [s for s in self._spells
-                    if flt in s["name"].lower()] if flt else self._spells
+        filtered = ([s for s in self._spells if flt in s["name"].lower()]
+                    if flt else self._spells)
         self._populate(filtered)
         self._count_lbl.config(text=f"{len(filtered)} / {len(self._spells)}")
 
@@ -1801,24 +1918,106 @@ class SpellsTab(tk.Frame):
             return
         name = self._tv.item(sel[0], "values")[0]
         s = next((x for x in self._spells if x["name"] == name), None)
-        if not s:
-            return
-        txt = self._det_text
-        txt.configure(state="normal")
-        txt.delete("1.0", "end")
-        txt.insert("end", f"{s['name']}\n", "h")
+        if s:
+            self._show_detail(s)
 
-        def row(k, v):
-            txt.insert("end", f"  {k:<18}", "kv")
-            txt.insert("end", f"{v}\n")
+    def _show_detail(self, s: Dict):
+        # ── Header ───────────────────────────────────────────────────────────
+        self._spell_name_lbl.config(text=s["name"])
+        self._spell_desc_lbl.config(text=s.get("description", ""))
 
-        row("Mana cost",  s.get("mana","—"))
-        row("Damage",     s.get("damage","—"))
-        row("Duration",   s.get("duration","—"))
-        if s.get("description"):
-            txt.insert("end", "\nNotes:\n", "kv")
-            txt.insert("end", f"  {s['description']}\n")
-        txt.configure(state="disabled")
+        # Icon
+        if HAS_PIL:
+            icon_name = s.get("icon_name", s["name"])
+            if icon_name not in self._spell_ph:
+                img = _load_spell_icon(icon_name, size=56)
+                if img:
+                    self._spell_ph[icon_name] = ImageTk.PhotoImage(img)
+                else:
+                    self._spell_ph[icon_name] = None
+            ph = self._spell_ph.get(icon_name)
+            if ph:
+                self._icon_lbl.config(image=ph, width=0)
+                self._icon_lbl._ph = ph
+            else:
+                self._icon_lbl.config(image="", text="?", fg=FG_MUTED,
+                                      font=("Segoe UI", 22), width=3)
+
+        # ── Body: clear and rebuild ───────────────────────────────────────────
+        for w in self._body.winfo_children():
+            w.destroy()
+        self._variant_talis_widgets.clear()
+
+        def _sect(txt):
+            tk.Label(self._body, text=txt, bg=BG_PANEL, fg=ACCENT,
+                     font=("Segoe UI", 9, "bold"), anchor="w"
+                     ).pack(fill="x", padx=10, pady=(8, 2))
+
+        def _row(k, v):
+            f = tk.Frame(self._body, bg=BG_PANEL)
+            f.pack(fill="x", padx=10, pady=1)
+            tk.Label(f, text=f"{k}:", bg=BG_PANEL, fg=ACCENT2,
+                     font=("Segoe UI", 9), width=16, anchor="w").pack(side="left")
+            tk.Label(f, text=str(v), bg=BG_PANEL, fg=FG_TEXT,
+                     font=("Consolas", 9), anchor="w").pack(side="left")
+
+        # ── Stats ─────────────────────────────────────────────────────────────
+        _sect("STATS")
+        dt = DAMAGE_TYPE_NAMES.get(s.get("damage_type", ""), s.get("damage_type", ""))
+        _row("Damage type", dt or "—")
+        _row("Animation",   s.get("animation") or "—")
+        if s.get("damage"):
+            _row("Damage",  s["damage"])
+        if s.get("duration"):
+            _row("Duration", s["duration"])
+
+        # ── Variants / Talisman combos ────────────────────────────────────────
+        variants = s.get("variants", [])
+        if variants:
+            _sect(f"VARIANTS  ({len(variants)})")
+            for v in variants:
+                vf = tk.Frame(self._body, bg=BG_CARD,
+                              highlightthickness=1, highlightbackground=BORDER)
+                vf.pack(fill="x", padx=10, pady=3)
+
+                # Variant name + mana
+                hf = tk.Frame(vf, bg=BG_CARD)
+                hf.pack(fill="x", padx=6, pady=(4, 2))
+                tk.Label(hf, text=v["name"], bg=BG_CARD, fg=FG_TEXT,
+                         font=("Segoe UI", 9, "bold")).pack(side="left")
+                if v.get("mana"):
+                    tk.Label(hf, text=f"  {v['mana']} mana",
+                             bg=BG_CARD, fg=ACCENT2,
+                             font=("Segoe UI", 8)).pack(side="left")
+                if v.get("min_d") not in (None, "—") and v.get("max_d") not in (None, "—"):
+                    tk.Label(hf, text=f"  dmg {v['min_d']}–{v['max_d']}",
+                             bg=BG_CARD, fg=GOLD,
+                             font=("Segoe UI", 8)).pack(side="left")
+
+                # Talisman icon chain
+                talis_str  = v.get("talismans", "")
+                talis_names = v.get("talis_names", [])
+                tf = tk.Frame(vf, bg=BG_CARD)
+                tf.pack(fill="x", padx=6, pady=(0, 4))
+                for letter, tname in zip(talis_str, talis_names):
+                    ph = self._talis_ph.get(tname)
+                    cell = tk.Frame(tf, bg=BG_CARD)
+                    cell.pack(side="left", padx=3)
+                    if ph:
+                        lbl_i = tk.Label(cell, image=ph, bg=BG_CARD)
+                        lbl_i.pack()
+                        lbl_i._ph = ph
+                        self._variant_talis_widgets.append(lbl_i)
+                    tk.Label(cell, text=tname, bg=BG_CARD, fg=FG_DIM,
+                             font=("Segoe UI", 7)).pack()
+
+                if v.get("effect"):
+                    ef = tk.Frame(vf, bg=BG_CARD)
+                    ef.pack(fill="x", padx=6, pady=(0, 4))
+                    tk.Label(ef, text="Effect:", bg=BG_CARD, fg=FG_MUTED,
+                             font=("Segoe UI", 8)).pack(side="left")
+                    tk.Label(ef, text=v["effect"], bg=BG_CARD, fg=ACCENT3,
+                             font=("Consolas", 8)).pack(side="left", padx=4)
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -2781,9 +2980,15 @@ class ModelsTab(tk.Frame):
                     f"  ·  state: {state_label}"
                     + (f"  ·  frame {frame}" if max_f > 0 else "")
                     + ("  ·  " + " ".join(extras) if extras else ""))
+            # Preserve textures and face_tex_indices across state changes
+            stored_tex = self._viewer._textures if self._viewer._textures else None
+            stored_fti = (geom.face_tex_indices
+                          if geom.face_tex_indices else None)
             self._viewer.load(geom.vertices, geom.faces, info,
                               normals=geom.normals if has_nrm else None,
-                              uvs=geom.uvs if has_uvs else None)
+                              uvs=geom.uvs if has_uvs else None,
+                              textures=stored_tex,
+                              face_tex_indices=stored_fti)
 
     def _on_frame_change(self, val=None):
         """Frame scrubber moved."""
@@ -2989,7 +3194,8 @@ GRID_COLS   = 8    # thumbnails per row
 
 def _decode_tn_pixels(raw: bytes) -> Optional[bytes]:
     """
-    Decode a 768-byte .tn file to 768 bytes of flat RGB888 (16×16 image).
+    Decode a 768-byte .tn file to 1024 bytes of flat RGBA8888 (16×16 image).
+    Palette index 0 is transparent (alpha=0); all others opaque.
 
     .tn format:
       [0:512]   256 × uint16 LE X1R5G5B5 palette  (R=bits14-10, G=9-5, B=4-0)
@@ -2997,7 +3203,6 @@ def _decode_tn_pixels(raw: bytes) -> Optional[bytes]:
     """
     if len(raw) < 768:
         return None
-    # Decode palette
     pal = []
     for i in range(256):
         word = struct.unpack_from('<H', raw, i * 2)[0]
@@ -3005,19 +3210,22 @@ def _decode_tn_pixels(raw: bytes) -> Optional[bytes]:
         g = ((word >>  5) & 0x1F) << 3
         b = ( word        & 0x1F) << 3
         pal.append((r, g, b))
-    # Map 16×16 indices to RGB
     indices = raw[512:768]
-    pixels  = bytearray(256 * 3)
+    pixels  = bytearray(256 * 4)  # RGBA
     for j in range(256):
-        r, g, b = pal[indices[j]]
-        pixels[j * 3]     = r
-        pixels[j * 3 + 1] = g
-        pixels[j * 3 + 2] = b
+        idx = indices[j]
+        r, g, b = pal[idx]
+        a = 0 if idx == 0 else 255
+        pixels[j * 4]     = r
+        pixels[j * 4 + 1] = g
+        pixels[j * 4 + 2] = b
+        pixels[j * 4 + 3] = a
     return bytes(pixels)
 
 
-def _load_tn_image(tn_path: Path, size: int = THUMB_SIZE) -> Optional["Image.Image"]:
-    """Load a 16×16 .tn thumbnail (X1R5G5B5 palette + indexed pixels)."""
+def _load_tn_image(tn_path: Path, size: int = THUMB_SIZE,
+                   bg: tuple = (30, 42, 69)) -> Optional["Image.Image"]:
+    """Load a 16×16 .tn thumbnail, composited over dark bg (index 0 = transparent)."""
     if not HAS_PIL:
         return None
     try:
@@ -3025,8 +3233,10 @@ def _load_tn_image(tn_path: Path, size: int = THUMB_SIZE) -> Optional["Image.Ima
         px  = _decode_tn_pixels(raw)
         if px is None:
             return None
-        img = Image.frombytes('RGB', (16, 16), px)
-        return img.resize((size, size), Image.NEAREST)
+        rgba = Image.frombytes('RGBA', (16, 16), px)
+        canvas = Image.new('RGB', (16, 16), bg)
+        canvas.paste(rgba, mask=rgba.split()[3])
+        return canvas.resize((size, size), Image.NEAREST)
     except Exception:
         return None
 
@@ -3335,6 +3545,277 @@ class SpritesTab(tk.Frame):
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
+#  SOUNDS TAB
+# ═══════════════════════════════════════════════════════════════════════════════
+
+class SoundsTab(tk.Frame):
+    """Browse and play all game audio: music tracks + voice/SFX MP3s."""
+
+    def __init__(self, parent, status: StatusBar):
+        super().__init__(parent, bg=BG_MID)
+        self._status       = status
+        self._sounds: List[Dict] = []
+        self._current_proc = None
+        self._build_ui()
+        self.after(600, self._load_all)
+
+    def _build_ui(self):
+        bar = tk.Frame(self, bg=BG_DARK, pady=4)
+        bar.pack(fill="x")
+
+        tk.Label(bar, text="Filter:", bg=BG_DARK, fg=FG_DIM,
+                 font=("Segoe UI", 10)).pack(side="left", padx=(10, 4))
+        self._flt_var = tk.StringVar()
+        tk.Entry(bar, textvariable=self._flt_var,
+                 bg=BG_PANEL, fg=FG_TEXT, insertbackground=FG_TEXT,
+                 font=("Segoe UI", 10), relief="flat", width=28
+                 ).pack(side="left", padx=4)
+        self._flt_var.trace_add("write", self._filter)
+
+        tk.Button(bar, text="▶ Play", bg=ACCENT3, fg="#000", relief="flat",
+                  font=("Segoe UI", 10, "bold"), padx=10,
+                  command=self._play_selected).pack(side="left", padx=8)
+        tk.Button(bar, text="■ Stop", bg=RED, fg="white", relief="flat",
+                  font=("Segoe UI", 10, "bold"), padx=10,
+                  command=self._stop).pack(side="left", padx=2)
+
+        self._count_lbl = tk.Label(bar, text="", bg=BG_DARK, fg=FG_DIM,
+                                   font=("Segoe UI", 9))
+        self._count_lbl.pack(side="right", padx=12)
+
+        pane = tk.PanedWindow(self, orient="horizontal", bg=BG_DARK,
+                              sashwidth=6, sashrelief="flat")
+        pane.pack(fill="both", expand=True)
+
+        tv_f = tk.Frame(pane, bg=BG_MID)
+        pane.add(tv_f, minsize=560)
+        cols = ("name", "cat", "size")
+        self._tv = ttk.Treeview(tv_f, columns=cols, show="headings",
+                                selectmode="browse")
+        self._tv.heading("name", text="File",     anchor="w")
+        self._tv.heading("cat",  text="Category", anchor="w")
+        self._tv.heading("size", text="KB",        anchor="center")
+        self._tv.column("name", width=320, stretch=True)
+        self._tv.column("cat",  width=120, stretch=False)
+        self._tv.column("size", width=60,  stretch=False, anchor="center")
+        sb = ttk.Scrollbar(tv_f, orient="vertical", command=self._tv.yview)
+        self._tv.configure(yscrollcommand=sb.set)
+        sb.pack(side="right", fill="y")
+        self._tv.pack(fill="both", expand=True)
+        self._tv.bind("<Double-Button-1>", lambda e: self._play_selected())
+
+        # Detail panel
+        det = tk.Frame(pane, bg=BG_PANEL, padx=12, pady=12)
+        pane.add(det, minsize=200)
+        tk.Label(det, text="SOUND DETAILS", bg=BG_PANEL, fg=ACCENT2,
+                 font=("Segoe UI", 11, "bold")).pack(anchor="w")
+        ttk.Separator(det).pack(fill="x", pady=6)
+        self._det_lbl = tk.Label(det, text="Select a file to preview",
+                                 bg=BG_PANEL, fg=FG_DIM,
+                                 font=("Segoe UI", 9), wraplength=180,
+                                 justify="left", anchor="w")
+        self._det_lbl.pack(anchor="w")
+
+    def _load_all(self):
+        self._status.set("Scanning sound files…")
+        sounds = []
+        # Music OGG tracks
+        for snd_dir in EXTRACT_DIR.rglob("Sound"):
+            if not snd_dir.is_dir():
+                continue
+            for f in sorted(snd_dir.iterdir()):
+                if f.suffix.lower() in ('.ogg', '.wav'):
+                    cat = "Music" if f.suffix.lower() == '.ogg' else "SFX"
+                    sounds.append({"name": f.name, "cat": cat,
+                                   "path": f, "size_kb": f.stat().st_size // 1024})
+            # English voice / SFX subfolder
+            eng = snd_dir / "english"
+            if eng.is_dir():
+                for f in sorted(eng.iterdir()):
+                    if f.suffix.lower() in ('.mp3', '.wav', '.ogg'):
+                        sounds.append({"name": f.name, "cat": "Voice/SFX",
+                                       "path": f, "size_kb": f.stat().st_size // 1024})
+        self._sounds = sounds
+        self._populate(sounds)
+        self._count_lbl.config(text=f"{len(sounds)} sounds")
+        self._status.set(f"Sounds: {len(sounds)} files indexed")
+
+    def _populate(self, data: List[Dict]):
+        self._tv.delete(*self._tv.get_children())
+        for s in data:
+            self._tv.insert("", "end",
+                values=(s["name"], s["cat"], s["size_kb"]),
+                tags=(str(s["path"]),))
+
+    def _filter(self, *_):
+        flt = self._flt_var.get().strip().lower()
+        filtered = ([s for s in self._sounds
+                     if flt in s["name"].lower() or flt in s["cat"].lower()]
+                    if flt else self._sounds)
+        self._populate(filtered)
+        self._count_lbl.config(text=f"{len(filtered)} / {len(self._sounds)}")
+
+    def _selected_path(self) -> Optional[Path]:
+        sel = self._tv.selection()
+        if not sel:
+            return None
+        tags = self._tv.item(sel[0], "tags")
+        return Path(tags[0]) if tags else None
+
+    def _play_selected(self):
+        p = self._selected_path()
+        if p is None or not p.exists():
+            self._status.set("Select a sound file first.")
+            return
+        self._stop()
+        self._status.set(f"Playing: {p.name}")
+        self._det_lbl.config(text=f"{p.name}\n{p.stat().st_size // 1024} KB")
+        import subprocess, sys
+        try:
+            if sys.platform == "win32":
+                import os
+                os.startfile(str(p))
+            else:
+                subprocess.Popen(["xdg-open", str(p)])
+        except Exception as e:
+            self._status.set(f"Playback error: {e}")
+
+    def _stop(self):
+        if self._current_proc and self._current_proc.poll() is None:
+            try:
+                self._current_proc.terminate()
+            except Exception:
+                pass
+        self._current_proc = None
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+#  CINEMATIX TAB
+# ═══════════════════════════════════════════════════════════════════════════════
+
+class CinematiXTab(tk.Frame):
+    """Browse and launch all Smacker (.SMK) video files."""
+
+    _SMK_DIRS = [
+        Path("C:/GOG Games/Revenant/Disk2"),
+        GAME_DIR / "Disk2",
+    ]
+
+    def __init__(self, parent, status: StatusBar):
+        super().__init__(parent, bg=BG_MID)
+        self._status = status
+        self._videos: List[Dict] = []
+        self._build_ui()
+        self.after(300, self._load_all)
+
+    def _build_ui(self):
+        bar = tk.Frame(self, bg=BG_DARK, pady=4)
+        bar.pack(fill="x")
+        tk.Label(bar, text="Revenant FMV / Cinematix Videos", bg=BG_DARK,
+                 fg=FG_DIM, font=("Segoe UI", 10)).pack(side="left", padx=10)
+        tk.Button(bar, text="▶ Play", bg=ACCENT, fg="white", relief="flat",
+                  font=("Segoe UI", 10, "bold"), padx=10,
+                  command=self._play_selected).pack(side="left", padx=8)
+        self._count_lbl = tk.Label(bar, text="", bg=BG_DARK, fg=FG_DIM,
+                                   font=("Segoe UI", 9))
+        self._count_lbl.pack(side="right", padx=12)
+
+        pane = tk.PanedWindow(self, orient="horizontal", bg=BG_DARK,
+                              sashwidth=6, sashrelief="flat")
+        pane.pack(fill="both", expand=True)
+
+        tv_f = tk.Frame(pane, bg=BG_MID)
+        pane.add(tv_f, minsize=400)
+        cols = ("name", "size", "path")
+        self._tv = ttk.Treeview(tv_f, columns=cols, show="headings",
+                                selectmode="browse")
+        self._tv.heading("name", text="Video File", anchor="w")
+        self._tv.heading("size", text="Size (MB)",  anchor="center")
+        self._tv.heading("path", text="Location",   anchor="w")
+        self._tv.column("name", width=240, stretch=False)
+        self._tv.column("size", width=80,  stretch=False, anchor="center")
+        self._tv.column("path", width=300, stretch=True)
+        sb = ttk.Scrollbar(tv_f, orient="vertical", command=self._tv.yview)
+        self._tv.configure(yscrollcommand=sb.set)
+        sb.pack(side="right", fill="y")
+        self._tv.pack(fill="both", expand=True)
+        self._tv.bind("<Double-Button-1>", lambda e: self._play_selected())
+
+        det = tk.Frame(pane, bg=BG_PANEL, padx=14, pady=12)
+        pane.add(det, minsize=240)
+        tk.Label(det, text="VIDEO INFO", bg=BG_PANEL, fg=ACCENT,
+                 font=("Segoe UI", 11, "bold")).pack(anchor="w")
+        ttk.Separator(det).pack(fill="x", pady=6)
+        self._det_lbl = tk.Label(det, text="Select a video to preview info",
+                                 bg=BG_PANEL, fg=FG_DIM, font=("Segoe UI", 9),
+                                 wraplength=200, justify="left", anchor="w")
+        self._det_lbl.pack(anchor="w")
+        tk.Label(det, text="\nDouble-click or press ▶ Play to open\nwith the system's default video player\n(install VLC for best SMK support).",
+                 bg=BG_PANEL, fg=FG_MUTED, font=("Segoe UI", 8),
+                 justify="left").pack(anchor="w", pady=8)
+
+    def _load_all(self):
+        self._status.set("Scanning for SMK video files…")
+        seen: set = set()
+        videos = []
+        search_dirs = list(self._SMK_DIRS) + [GAME_DIR, EXTRACT_DIR]
+        for d in search_dirs:
+            if not d.exists():
+                continue
+            for f in d.rglob("*.smk"):
+                key = f.name.upper()
+                if key not in seen:
+                    seen.add(key)
+                    videos.append({"name": f.name,
+                                   "path": f,
+                                   "size_mb": f.stat().st_size / (1024 * 1024)})
+            for f in d.rglob("*.SMK"):
+                key = f.name.upper()
+                if key not in seen:
+                    seen.add(key)
+                    videos.append({"name": f.name,
+                                   "path": f,
+                                   "size_mb": f.stat().st_size / (1024 * 1024)})
+        videos.sort(key=lambda x: x["name"].upper())
+        self._videos = videos
+        self._tv.delete(*self._tv.get_children())
+        for v in videos:
+            self._tv.insert("", "end",
+                values=(v["name"], f"{v['size_mb']:.1f}", str(v["path"].parent)),
+                tags=(str(v["path"]),))
+        self._count_lbl.config(text=f"{len(videos)} video(s)")
+        if videos:
+            self._status.set(f"Cinematix: {len(videos)} SMK video(s) found")
+        else:
+            self._status.set("No SMK videos found — check GOG install path")
+
+    def _play_selected(self):
+        sel = self._tv.selection()
+        if not sel:
+            self._status.set("Select a video first.")
+            return
+        tags = self._tv.item(sel[0], "tags")
+        if not tags:
+            return
+        p = Path(tags[0])
+        if not p.exists():
+            self._status.set(f"File not found: {p}")
+            return
+        import sys, os
+        self._det_lbl.config(
+            text=f"{p.name}\n{p.stat().st_size / (1024*1024):.1f} MB\n{p.parent}")
+        self._status.set(f"Opening: {p.name}")
+        try:
+            if sys.platform == "win32":
+                os.startfile(str(p))
+            else:
+                import subprocess
+                subprocess.Popen(["xdg-open", str(p)])
+        except Exception as e:
+            self._status.set(f"Could not open video: {e}")
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
 #  MAIN APPLICATION
 # ═══════════════════════════════════════════════════════════════════════════════
 
@@ -3401,13 +3882,15 @@ class AssetStudio(tk.Tk):
         self._nb = ttk.Notebook(self)
         self._nb.pack(fill="both", expand=True, padx=0, pady=0)
 
-        self._map_tab  = WorldMapTab(self._nb, self._status)
-        self._char_tab = CharacterGalleryTab(self._nb, self._status)
-        self._equip_tab= EquipmentTab(self._nb, self._status)
-        self._spr_tab  = SpritesTab(self._nb, self._status)
-        self._spell_tab= SpellsTab(self._nb, self._status)
-        self._scr_tab  = ScriptsTab(self._nb, self._status)
-        self._mod_tab  = ModelsTab(self._nb, self._status)
+        self._map_tab   = WorldMapTab(self._nb, self._status)
+        self._char_tab  = CharacterGalleryTab(self._nb, self._status)
+        self._equip_tab = EquipmentTab(self._nb, self._status)
+        self._spr_tab   = SpritesTab(self._nb, self._status)
+        self._spell_tab = SpellsTab(self._nb, self._status)
+        self._scr_tab   = ScriptsTab(self._nb, self._status)
+        self._mod_tab   = ModelsTab(self._nb, self._status)
+        self._snd_tab   = SoundsTab(self._nb, self._status)
+        self._cine_tab  = CinematiXTab(self._nb, self._status)
 
         self._nb.add(self._map_tab,   text="  World Map  ")
         self._nb.add(self._char_tab,  text="  Characters  ")
@@ -3416,6 +3899,8 @@ class AssetStudio(tk.Tk):
         self._nb.add(self._spell_tab, text="  Spells  ")
         self._nb.add(self._scr_tab,   text="  Scripts  ")
         self._nb.add(self._mod_tab,   text="  3D Models  ")
+        self._nb.add(self._snd_tab,   text="  Sounds  ")
+        self._nb.add(self._cine_tab,  text="  Cinematix  ")
 
         # Update header counts after brief delay
         self.after(2000, self._update_counts)
@@ -3426,9 +3911,10 @@ class AssetStudio(tk.Tk):
             bmp_count = len(list(IMAGERY_ASSETS.rglob("*.bmp")))
             def_count = len(list(EXTRACT_DIR.rglob("*.def")))
             mp3_count = len(list(EXTRACT_DIR.rglob("*.mp3")))
+            ogg_count = len(list(EXTRACT_DIR.rglob("*.ogg")))
             self._hdr_counts.config(
                 text=f"{i3d_count} models  |  {bmp_count} sprites  |  "
-                     f"{def_count} scripts  |  {mp3_count} music tracks")
+                     f"{def_count} scripts  |  {mp3_count + ogg_count} sounds")
         except Exception:
             pass
 

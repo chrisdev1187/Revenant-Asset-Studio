@@ -491,53 +491,31 @@ def export_gltf(geom, textures: list, out_path: Path,
         materials_gltf = [{"name": "mat0",
                            "pbrMetallicRoughness": {"metallicFactor": 0.0}}]
 
-    # ── Mesh primitives (one per texture group) ────────────────────────────
-    # Build per-material face lists so each material gets its own primitive.
-    # face_tex_indices: -1=no-tex, 0..N-1=tex slot.
-    face_by_mat: dict = {}
-    for fi, (a, b, c) in enumerate(geom.faces):
-        t_idx = geom.face_tex_indices[fi] if fi < len(geom.face_tex_indices) else 0
-        mat_idx = max(0, t_idx)          # -1 no-tex → mat 0
-        face_by_mat.setdefault(mat_idx, []).append((a, b, c))
-
-    primitives = []
-    for mat_idx in sorted(face_by_mat):
-        face_group = face_by_mat[mat_idx]
-        g_idx_flat = [i for tri in face_group for i in tri]
-        boff, blen = buf.add_ushorts(g_idx_flat)
-        bv_g = _add_bv(boff, blen, ELEMENT_ARRAY_BUFFER)
-        a_g  = _add_acc(bv_g, UNSIGNED_SHORT, len(g_idx_flat), "SCALAR",
-                        min_v=[0], max_v=[nv - 1])
-        attrs = {"POSITION": acc_pos}
-        if acc_nrm is not None:  attrs["NORMAL"]     = acc_nrm
-        if acc_uv  is not None:  attrs["TEXCOORD_0"] = acc_uv
-        if acc_joints is not None: attrs["JOINTS_0"]  = acc_joints
-        if acc_weights is not None: attrs["WEIGHTS_0"] = acc_weights
-        prim = {"attributes": attrs, "indices": a_g}
-        prim["material"] = min(mat_idx, len(materials_gltf) - 1)
-        primitives.append(prim)
-
-    if not primitives:
-        # Fallback: single primitive with all faces
-        attrs = {"POSITION": acc_pos}
-        if acc_nrm is not None:  attrs["NORMAL"]     = acc_nrm
-        if acc_uv  is not None:  attrs["TEXCOORD_0"] = acc_uv
-        if acc_joints is not None: attrs["JOINTS_0"]  = acc_joints
-        if acc_weights is not None: attrs["WEIGHTS_0"] = acc_weights
-        primitives = [{"attributes": attrs, "indices": acc_idx, "material": 0}]
+    # ── Mesh primitive (single, all faces) ─────────────────────────────────
+    # One primitive avoids Blender importing each material group as a separate
+    # object.  Material assignment uses face_tex_indices[0]'s material where
+    # meaningful; full per-face split is unnecessary for Blender compatibility.
+    attrs = {"POSITION": acc_pos}
+    if acc_nrm    is not None: attrs["NORMAL"]     = acc_nrm
+    if acc_uv     is not None: attrs["TEXCOORD_0"] = acc_uv
+    if acc_joints is not None: attrs["JOINTS_0"]   = acc_joints
+    if acc_weights is not None: attrs["WEIGHTS_0"] = acc_weights
+    prim0 = {"attributes": attrs, "indices": acc_idx, "material": 0}
+    primitives = [prim0]
 
     mesh_gltf = {"name": geom.path.stem, "primitives": primitives}
 
     # ── Nodes ──────────────────────────────────────────────────────────────
-    # Node 0 = mesh node; nodes 1..N = bone nodes.
+    # Layout for Blender compatibility:
+    #   Node 0          : mesh node (mesh=0, skin=0 if rigged) — NO bone children
+    #   Nodes 1..nb     : bone nodes (hierarchy preserved via "children" fields)
+    # Scene root = [0, ...root_bone_indices]  so mesh and armature are siblings.
     nodes_gltf = []
     skin_node_offset = 1   # bone nodes start at index 1
 
     if has_rig:
-        # Find root bones
         roots = [i for i in range(nb) if rig.bone_parents[i] < 0 or
                  rig.bone_parents[i] >= nb]
-        # Build children lists
         children_of = {i: [] for i in range(nb)}
         for i in range(nb):
             p = rig.bone_parents[i]
@@ -545,8 +523,7 @@ def export_gltf(geom, textures: list, out_path: Path,
                 children_of[p].append(i)
 
         def _node_for_bone(bi):
-            """Build glTF node dict for bone bi."""
-            wm = rig.world_mats[bi]
+            wm   = rig.world_mats[bi]
             node = {"name": rig.bone_names[bi]}
             node["translation"] = _mat_translation(wm)
             node["rotation"]    = _mat_to_quat(wm)
@@ -556,31 +533,28 @@ def export_gltf(geom, textures: list, out_path: Path,
                 node["children"] = ch
             return node
 
-        # Mesh node
-        mesh_node = {
-            "name": geom.path.stem,
-            "mesh": 0,
-        }
-        if has_rig:
-            mesh_node["skin"] = 0
-        # Mesh node children = root bones
-        mesh_node["children"] = [r + skin_node_offset for r in roots]
+        # Mesh node — skin reference only, bones are NOT children
+        mesh_node = {"name": geom.path.stem, "mesh": 0, "skin": 0}
         nodes_gltf.append(mesh_node)
 
-        # Bone nodes (in order 0..nb-1, offset by 1 for mesh node)
         for bi in range(nb):
             nodes_gltf.append(_node_for_bone(bi))
+
+        # Scene root: mesh node + all root bones as siblings (Blender reads armature this way)
+        scene_root_nodes = [0] + [r + skin_node_offset for r in roots]
     else:
-        nodes_gltf = [{"name": geom.path.stem, "mesh": 0}]
+        nodes_gltf     = [{"name": geom.path.stem, "mesh": 0}]
+        scene_root_nodes = [0]
 
     # ── Skin ───────────────────────────────────────────────────────────────
     skins_gltf = []
     if has_rig and acc_ibm is not None:
+        root0 = (roots[0] + skin_node_offset) if roots else skin_node_offset
         skins_gltf = [{
-            "name": f"{geom.path.stem}_armature",
-            "inverseBindMatrices": acc_ibm,
-            "joints": [i + skin_node_offset for i in range(nb)],
-            "skeleton": skin_node_offset,  # root joint
+            "name":                  f"{geom.path.stem}_armature",
+            "inverseBindMatrices":   acc_ibm,
+            "joints":                [i + skin_node_offset for i in range(nb)],
+            "skeleton":              root0,
         }]
 
     # ── Animations ─────────────────────────────────────────────────────────
@@ -643,7 +617,7 @@ def export_gltf(geom, textures: list, out_path: Path,
             "generator": "RevEngine — Revenant (1999) Asset Studio",
         },
         "scene":  0,
-        "scenes": [{"nodes": [0], "name": "Scene"}],
+        "scenes": [{"nodes": scene_root_nodes, "name": "Scene"}],
         "nodes":  nodes_gltf,
         "meshes": [mesh_gltf],
         "accessors":    accessors,

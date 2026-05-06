@@ -10,17 +10,39 @@ Built on research from nuxdie, MathJazz, and benjcooley.
 
 | Feature | Status | Notes |
 |---|---|---|
-| World maps & zones | ✅ 100% | All automaps stitched, PNG export |
-| Sprite decode (.i2d) | ✅ 90% | Thumbnail browser, category filter |
+| World maps & zones | ✅ Full | All automaps stitched, PNG export via file dialog |
+| Sprite decode (.i2d) | ✅ 90% | Thumbnail browser, category filter, full decode |
 | Character sheets | 🔄 50% | Parsed from char.def |
+| Equipment (Weapons/Armor) | ✅ Full | Icons, stats; correct palette transparency + exact name matching |
+| Spells | ✅ Full | Icon, talisman combos, variants, mana, damage type |
+| Sounds | ✅ Full | 1743 SFX/voice MP3s + OGG music, filter + playback |
+| Cinematix | ✅ Full | 4 SMK FMV videos, playback via system player |
 | 3D Models — geometry | ✅ Full | All 113 characters, skeletal assembly |
 | 3D Models — animation | ✅ Full | All states/frames, scrubber + playback |
 | 3D Models — textures | ✅ Full | Multi-texture, tiling UV, backface cull |
-| 3D Models — glTF export | ✅ Full | Rigged mesh + all animation clips |
+| 3D Models — glTF export | ✅ Full | Single mesh, scene-level rig, all animation clips |
 | OBJ export | ✅ | Static pose, normals, UVs, texture PNG |
-| Equipment | 🔄 WIP | |
-| Spells | 🔄 WIP | |
 | Scripts | 🔄 50% | .def cross-reference search |
+| UI elements | ⏳ Planned | .dat decode (SpellIcons, bottombar, dialog) |
+| Game Construction Kit | ⏳ Planned | In-game editor content |
+
+---
+
+## Changelog
+
+### 2026-05-06
+- **World Map:** Save PNG now opens a file dialog instead of saving to a hardcoded path. Removed broken "Export All Zones" and "Diagnose" buttons.
+- **Equipment icons:** Fixed purple/magenta backgrounds — palette index 0 is now treated as transparent (RGBA). Fixed wrong icons caused by over-permissive name matching; now uses exact-first then shortest-prefix.
+- **Spells tab:** Complete rework — shows spell icon, description, mana, damage type, and full variant list with talisman icon chains per variant.
+- **Sounds tab:** New tab listing all 1,743 SFX/voice MP3s and OGG music tracks with name filter and one-click playback.
+- **Cinematix tab:** New tab listing all 4 SMK FMV files with file size and playback via system handler.
+- **Models — animation state:** Fixed texture reset when switching animation states; stored textures and face_tex_indices are now preserved across `viewer.load()` calls.
+- **glTF export:** Fixed fragmentation — was exporting one mesh primitive per texture group (100+ objects in Blender); now exports a single primitive with a single material.
+- **glTF export:** Fixed missing rig — bones were children of the mesh node causing Blender to nest armature inside mesh; bones are now scene-level siblings of the mesh node.
+- **i2d.py:** Fixed LZ back-reference implementation — code was copying from the compressed payload stream; corrected to copy from the decompressed `chunk_buf` as the format spec requires.
+
+### Known limitation — sprite LZ cache references
+1,859 of 2,224 sprites use LZ back-references with `dist > 4096` that point into the game engine's **runtime chunk cache** — a global pool of previously-rendered sprite tiles maintained at runtime. These references cannot be resolved by a static decoder. Affected sprites decode correctly except for regions covered by those LZ tokens (which render transparent). The TN thumbnail always shows the correct low-resolution preview.
 
 ---
 

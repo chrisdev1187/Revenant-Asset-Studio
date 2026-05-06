@@ -335,21 +335,17 @@ def _decode_chunk(payload: bytes,
         elif b == dh:
             # ── LZ back-reference ─────────────────────────────────────────
             # Token: [DH][count][dist_lo][dist_hi]   (4 bytes total)
-            # Faithful port of ChunkDecompress ASM (chunkcache.cpp):
-            #   ESI_save = ESI (position after full 4-byte LZ token)
-            #   src = ESI_save - dist - 4  (in compressed stream)
-            #   Copy `count` bytes from payload[src..] to output.
-            # This copies from the COMPRESSED INPUT STREAM (not decompressed output).
+            # Source is chunk_buf (decompressed output) at position di - dist - 4.
+            # The -4 bias is confirmed by depy/RevenantRE.
             if i + 2 > chunk_end:
                 i = min(i + 3, chunk_end)
                 break
             count = payload[i];       i += 1
             dist  = payload[i] | (payload[i + 1] << 8); i += 2
 
-            # i is now ESI_save (just past the LZ token in the compressed stream)
-            lz_src = i - dist - 4
+            lz_src = di - dist - 4
             for k in range(count):
-                src_val = payload[lz_src + k] if 0 <= lz_src + k < len(payload) else 0
+                src_val = chunk_buf[lz_src + k] if 0 <= lz_src + k < CHUNK_PX * CHUNK_PX else 0
                 _put(src_val)
 
         else:
