@@ -12,6 +12,9 @@ build/
 test_renders/*.png
 test_renders/*.jpg
 
+# Auto-downloaded binaries
+tools/
+
 # IDE
 .vscode/
 .idea/

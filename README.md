@@ -27,6 +27,7 @@ Built on research from nuxdie, MathJazz, and benjcooley.
 | **Ahkuilon / Zone Scripts** | ✅ Full | 9 zone scripts (.s) + definition files; syntax highlight; live 2D CUBE object map; batch export |
 | **Menu bar** | ✅ Full | File / View / Export / Help; Settings dialog; keyboard shortcuts |
 | **Unified export** | ✅ Full | Export Current Tab (Ctrl+E), per-type menu entries, Export All Assets |
+| **Asset Upscaler** | ✅ Full | Real-ESRGAN ×4 batch upscale for UI panels, icons, model textures, sprites; before/after review window; flag/redo; Cinematix SMK→MP4 pipeline |
 | Deathmatch zones (DM1–DM6) | ⏳ Planned | 6 MP maps with .chr character saves, scripts, automaps |
 | Map chunk tiles | ⏳ Planned | 4,896 .DAT world geometry tiles (format TBD) |
 | Playable character textures | ⏳ Deferred | Known broken; requires separate investigation |
@@ -34,6 +35,13 @@ Built on research from nuxdie, MathJazz, and benjcooley.
 ---
 
 ## Changelog
+
+### 2026-05-07 — Asset Upscaler
+- **Asset Upscaler tab:** New tab batch-upscales all game asset categories using Real-ESRGAN (`RealESRGAN_x4plus_anime_6B`, 6-block RRDB). Categories: UI Panels (`.dat` frames), Equipment Icons, Talisman Icons, Model Textures (`.i3d` embedded), Sprites (`.i2d` clean), and Cinematix FMV. Assets ≤32 px are upscaled with `PIL.NEAREST ×4` (preserves pixel art; ESRGAN hallucinates at tiny resolutions); larger assets use the full neural upscaler. Output written to `renders/upscaled/<category>/`.
+- **Results review window:** Vertical scrollable card list shows every processed asset with before/after thumbnails, filename, resolution delta, and status badge (ok / flagged / failed). Selecting a card opens a side-by-side compare view with fit-to-panel zoom. Individual assets can be re-queued with different model or scale via **Redo**; **Redo Flagged** batch-reruns all flagged items.
+- **Cinematix SMK→MP4 pipeline:** Upscales Silmarillion `.smk` FMV files to MP4: FFmpeg extracts frames at 15 fps → ESRGAN upscales each frame → FFmpeg re-encodes to H.264 CRF 18. Searches `GOG Games/Revenant/Disk2` and `GAME_DIR` automatically. Output: `renders/upscaled/cinematix/<stem>_4x.mp4`.
+- **FFmpeg auto-installer:** Detects FFmpeg in `tools/ffmpeg.exe`, `PATH`, and common install locations. If missing, **Install FFmpeg** downloads the BtbN win64-lgpl build (~25 MB) and extracts `ffmpeg.exe` to `<project>/tools/` with a progress log. Custom path can also be set via **Browse**.
+- **basicsr torchvision compat patch:** `torchvision ≥0.16` removed `functional_tensor`. The upscaler applies a one-time idempotent patch to `basicsr/data/degradations.py` (changes the import to `torchvision.transforms.functional`) before loading the model.
 
 ### 2026-05-07
 - **Menu bar + Settings dialog:** Added File / View / Export / Help menu bar. Settings dialog (Ctrl+,) allows changing Game Dir, Extract Dir, and Renders Dir with JSON persistence (`revengine.json`). Keyboard shortcuts: Ctrl+Q quit, Ctrl+E export current tab, F1 about.
@@ -200,6 +208,55 @@ The output file is **self-contained** (all geometry, textures, and animation dat
 
 ---
 
+## Asset Upscaler
+
+The **Upscale** tab provides a fully automated HD upscaling pipeline for every asset category in the game.
+
+### Asset categories
+
+| Category | Source files | Method | Output size |
+|---|---|---|---|
+| UI Panels | `extracted/resources/*.dat` | Real-ESRGAN ×4 | up to 2560 px |
+| Equipment Icons | `Thumbnails/Equip/*.tn` | PIL NEAREST ×4 | 64×64 px |
+| Talisman Icons | `Thumbnails/Magic/*.tn` | PIL NEAREST ×4 | 64×64 px |
+| Model Textures | `Imagery/Chars/**/*.i3d` | Real-ESRGAN ×4 | up to 512 px |
+| Sprites | `Imagery/**/*.i2d` (LZ-clean) | Real-ESRGAN ×4 | up to 2048 px |
+| Cinematix FMV | `Disk2/*.smk` | FFmpeg + Real-ESRGAN ×4 + FFmpeg | H.264 MP4 |
+
+Icons ≤32 px use `PIL.NEAREST` rather than the neural upscaler to preserve pixel-art crispness and avoid hallucinated detail.
+
+### Output layout
+
+```
+renders/upscaled/
+├── ui_panels/          <stem>_f<n>.png  per dat frame
+├── equip_icons/        <stem>.png       64×64
+├── talisman_icons/     <stem>.png       64×64
+├── model_textures/     <stem>_t<n>.png  per texture slot
+├── sprites/            <stem>.png
+└── cinematix/          <stem>_4x.mp4
+```
+
+### Before/after review
+
+Every processed asset appears in the scrollable results list with status badge:
+
+| Badge | Meaning |
+|---|---|
+| **ok** | Passed visual inspection |
+| **flagged** | Manually marked for redo |
+| **failed** | Decode or ESRGAN error |
+
+Click any card to open the side-by-side compare view. Use **Flag** to mark an asset for redo, then **Redo** to reprocess a single item or **Redo Flagged** to batch-redo all flagged items with different model/scale settings.
+
+### Dependencies
+
+- **Real-ESRGAN** Python source — `C:\Users\chris\OneDrive\Desktop\upscaler\Real-ESRGAN`
+- **PyTorch** (CPU inference; `half=False` for Intel integrated graphics)
+- **FFmpeg** — auto-installed to `tools/ffmpeg.exe` via in-app downloader (BtbN win64-lgpl build)
+
+---
+
 ## File Format Reference
 
 ### Archive formats
@@ -349,6 +406,9 @@ Revengine/
 ├── export_zone_maps.py      CLI: batch-export automap zones to PNG
 ├── diagnose_automaps.py     Automap tile diagnostic tool
 ├── archaeology.py           Low-level format archaeology helpers
+│
+├── tools/
+│   └── ffmpeg.exe           Auto-downloaded by the Upscale tab (gitignored)
 │
 └── decoders/
     ├── i3d.py               .i3d skeletal model decoder (geometry + animation)
