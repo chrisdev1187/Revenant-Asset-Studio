@@ -12,23 +12,36 @@ Built on research from nuxdie, MathJazz, and benjcooley.
 |---|---|---|
 | World maps & zones | ✅ Full | All automaps stitched, PNG export via file dialog |
 | Sprite decode (.i2d) | ✅ 99.8% | Thumbnail browser, category filter, full decode; LZ cross-chunk history resolved |
-| Character sheets | 🔄 50% | Parsed from char.def |
+| Character sheets | ✅ Full | Portraits, parsed stats from char.def, batch PNG export |
 | Equipment (Weapons/Armor) | ✅ Full | Icons, stats; correct palette transparency + exact name matching |
-| Spells | ✅ Full | Icon, talisman combos, variants, mana, damage type |
-| Sounds | ✅ Full | 1743 SFX/voice MP3s + OGG music, filter + playback |
+| Spells | ✅ Full | Icon, talisman combos, variants, mana, damage type, animation link |
+| Sounds | ✅ Full | 1,743 SFX/voice MP3s + OGG music, filter + playback |
 | Cinematix | ✅ Full | 4 SMK FMV videos, playback via system player |
 | 3D Models — geometry | ✅ Full | All 113 characters, skeletal assembly |
 | 3D Models — animation | ✅ Full | All states/frames, scrubber + playback |
 | 3D Models — textures | ✅ Full | Multi-texture, tiling UV, backface cull |
 | 3D Models — glTF export | ✅ Full | Single mesh, scene-level rig, all animation clips |
-| OBJ export | ✅ | Static pose, normals, UVs, texture PNG |
-| Scripts | 🔄 50% | .def cross-reference search |
-| UI elements | ⏳ Planned | .dat decode (SpellIcons, bottombar, dialog) |
-| Game Construction Kit | ⏳ Planned | In-game editor content |
+| OBJ export | ✅ Full | Batch OBJ, static pose, normals, UVs, texture PNG |
+| Scripts | ✅ Full | All .def files, cross-reference search, batch export |
+| **UI Resources** | ✅ Full | All 60+ .dat UI files decoded; background preview + element tile grid; font glyph map; animation; batch export |
+| **Ahkuilon / Zone Scripts** | ✅ Full | 9 zone scripts (.s) + definition files; syntax highlight; live 2D CUBE object map; batch export |
+| **Menu bar** | ✅ Full | File / View / Export / Help; Settings dialog; keyboard shortcuts |
+| **Unified export** | ✅ Full | Export Current Tab (Ctrl+E), per-type menu entries, Export All Assets |
+| Deathmatch zones (DM1–DM6) | ⏳ Planned | 6 MP maps with .chr character saves, scripts, automaps |
+| Map chunk tiles | ⏳ Planned | 4,896 .DAT world geometry tiles (format TBD) |
+| Playable character textures | ⏳ Deferred | Known broken; requires separate investigation |
 
 ---
 
 ## Changelog
+
+### 2026-05-07
+- **Menu bar + Settings dialog:** Added File / View / Export / Help menu bar. Settings dialog (Ctrl+,) allows changing Game Dir, Extract Dir, and Renders Dir with JSON persistence (`revengine.json`). Keyboard shortcuts: Ctrl+Q quit, Ctrl+E export current tab, F1 about.
+- **Unified export menu:** Export → Export Current Tab (Ctrl+E) dispatches to whichever tab is active. Per-type entries for Characters, Equipment, Sprites, Spells, Scripts, Models, UI Resources, Ahkuilon. Export All Assets runs every exporter in sequence.
+- **UI Resources tab:** New tab browsing all 60+ CGSR `.dat` UI files from `extracted/resources/`. Decoded using a fixed `_decode_dat_frame` scan (was capped at 16 bytes — broke `credits.dat` / `splash.dat` whose TBitmapData sits at offset 2064). Layout: resizable PanedWindow with background preview (top, max 2× upscale) + element tile grid (bottom, 80 px cells). Background frame auto-detected as largest by area. Font files (≥20 glyphs all ≤24×32 px) render as a 16-column glyph map. Optional frame animation. Batch PNG export.
+- **`_bgr555_fast`:** New module-level helper decodes BGR555 16-bit pixel data via numpy vectorised bit-ops (near-instant for 640×480 frames); falls back to pure Python when numpy is absent.
+- **Ahkuilon tab:** New tab for the 9 zone script directories. Script viewer with syntax highlight (block, trigger, action, command, property, number, string, comment). Live 2D canvas map — parses all `CUBE` trigger volumes from each `.s` file and plots centroid dots with hover labels. Batch export of scripts and map images.
+- **`.dat` decoder scan-range fix:** `_decode_dat_frame` now scans the entire frame payload instead of only the first 16 bytes; added bounds guard before pixel extraction. Fixes `credits.dat`, `splash.dat`, and any other single-outer-frame files.
 
 ### 2026-05-06 — LZ cross-chunk history fix
 - **i2d.py — major sprite fix:** Resolved the long-standing LZ back-reference limitation.

@@ -22,6 +22,8 @@ import threading
 import hashlib
 import math
 import logging
+import json
+import os
 from pathlib import Path
 from typing import Optional, List, Dict, Tuple
 
@@ -54,6 +56,41 @@ IMAGERY     = EXTRACT_DIR / "imagery"
 RESOURCES   = EXTRACT_DIR / "resources"
 AHKUILON    = EXTRACT_DIR / "Ahkuilon"
 RENDERS_DIR = ENGINE_DIR / "test_renders"
+
+_CONFIG_PATH = ENGINE_DIR / "revengine.json"
+
+def _load_config():
+    global GAME_DIR, EXTRACT_DIR, RENDERS_DIR, IMAGERY, RESOURCES, AHKUILON
+    global IMAGERY_ASSETS, THUMBNAILS, CHAR_DEF, WEAPON_DEF, ARMOR_DEF, SPELL_DEF
+    if not _CONFIG_PATH.exists():
+        return
+    try:
+        cfg = json.loads(_CONFIG_PATH.read_text())
+        if "game_dir"    in cfg: GAME_DIR    = Path(cfg["game_dir"])
+        if "extract_dir" in cfg:
+            EXTRACT_DIR   = Path(cfg["extract_dir"])
+            IMAGERY       = EXTRACT_DIR / "imagery"
+            RESOURCES     = EXTRACT_DIR / "resources"
+            AHKUILON      = EXTRACT_DIR / "Ahkuilon"
+            IMAGERY_ASSETS = IMAGERY / "Imagery"
+            THUMBNAILS    = IMAGERY / "Thumbnails"
+            CHAR_DEF      = IMAGERY  / "char.def"
+            WEAPON_DEF    = IMAGERY  / "weapon.def"
+            ARMOR_DEF     = IMAGERY  / "armor.def"
+            SPELL_DEF     = RESOURCES / "spell.def"
+        if "renders_dir" in cfg: RENDERS_DIR = Path(cfg["renders_dir"])
+    except Exception:
+        pass
+
+def _save_config():
+    try:
+        _CONFIG_PATH.write_text(json.dumps({
+            "game_dir":    str(GAME_DIR),
+            "extract_dir": str(EXTRACT_DIR),
+            "renders_dir": str(RENDERS_DIR),
+        }, indent=2))
+    except Exception:
+        pass
 
 IMAGERY_ASSETS = IMAGERY / "Imagery"     # .i2d / .i3d / .bmp
 THUMBNAILS     = IMAGERY / "Thumbnails"  # .tn files
@@ -1144,6 +1181,9 @@ class CharacterGalleryTab(tk.Frame):
                                  width=24)
         self._search.pack(side="left", padx=4)
 
+        tk.Button(bar, text="Export All Portraits", bg=ACCENT2, fg="#000",
+                  relief="flat", font=("Segoe UI", 9, "bold"), padx=8,
+                  command=self._export_all).pack(side="right", padx=4)
         self._count_lbl = tk.Label(bar, text="", bg=BG_DARK, fg=FG_DIM,
                                     font=("Segoe UI", 9))
         self._count_lbl.pack(side="right", padx=12)
@@ -1479,6 +1519,34 @@ class CharacterGalleryTab(tk.Frame):
         except Exception:
             pass
 
+    def _export_all(self):
+        if not HAS_PIL:
+            self._status.set("PIL not available")
+            return
+        if not self._chars:
+            self._status.set("No characters loaded")
+            return
+        dest = RENDERS_DIR / "Characters"
+        dest.mkdir(parents=True, exist_ok=True)
+        ok = skip = 0
+        for ch in self._chars:
+            name = ch["name"]
+            portrait_path = find_portrait(name)
+            try:
+                if portrait_path:
+                    img = Image.open(portrait_path).convert("RGB")
+                else:
+                    img = make_placeholder_portrait(name, 128)
+                if img:
+                    safe = "".join(c if c.isalnum() or c in " _-" else "_" for c in name)
+                    img.save(str(dest / f"{safe}.png"))
+                    ok += 1
+                else:
+                    skip += 1
+            except Exception:
+                skip += 1
+        self._status.set(f"Characters exported: {ok} portraits → {dest}")
+
 
 # ═══════════════════════════════════════════════════════════════════════════════
 #  EQUIPMENT TAB
@@ -1517,6 +1585,9 @@ class EquipmentTab(tk.Frame):
                   font=("Segoe UI", 10), relief="flat", width=20
                   ).pack(side="left", padx=4)
         self._wpn_filter_var.trace_add("write", self._filter_weapons)
+        tk.Button(bar, text="Export All Icons", bg=ACCENT2, fg="#000",
+                  relief="flat", font=("Segoe UI", 9, "bold"), padx=8,
+                  command=self._export_all_weapons).pack(side="right", padx=4)
         self._wpn_count = tk.Label(bar, text="", bg=BG_DARK, fg=FG_DIM,
                                     font=("Segoe UI", 9))
         self._wpn_count.pack(side="right", padx=12)
@@ -1579,6 +1650,9 @@ class EquipmentTab(tk.Frame):
                   font=("Segoe UI", 10), relief="flat", width=20
                   ).pack(side="left", padx=4)
         self._arm_filter_var.trace_add("write", self._filter_armors)
+        tk.Button(bar, text="Export All Icons", bg=ACCENT2, fg="#000",
+                  relief="flat", font=("Segoe UI", 9, "bold"), padx=8,
+                  command=self._export_all_armors).pack(side="right", padx=4)
         self._arm_count = tk.Label(bar, text="", bg=BG_DARK, fg=FG_DIM,
                                     font=("Segoe UI", 9))
         self._arm_count.pack(side="right", padx=12)
@@ -1775,6 +1849,46 @@ class EquipmentTab(tk.Frame):
             pass
         lbl.config(image="")
 
+    def _export_all_weapons(self):
+        self._export_equip_icons(self._weapons, "Weapons")
+
+    def _export_all_armors(self):
+        self._export_equip_icons(self._armors, "Armors")
+
+    def _export_equip_icons(self, items: list, folder: str):
+        if not HAS_PIL or not items:
+            self._status.set(f"No {folder.lower()} loaded")
+            return
+        equip_dir = THUMBNAILS / "Equip"
+        dest = RENDERS_DIR / folder
+        dest.mkdir(parents=True, exist_ok=True)
+        ok = skip = 0
+        for item in items:
+            name = item["name"]
+            norm = name.lower().replace(" ", "").replace("-", "").replace("'", "")
+            best = None; best_score = 999
+            for f in equip_dir.iterdir():
+                if f.suffix.lower() != '.tn':
+                    continue
+                fn = f.stem.lower().replace(" ", "").replace("-", "").replace("'", "")
+                if fn == norm:
+                    best = f; break
+                if fn.startswith(norm) or norm.startswith(fn):
+                    score = abs(len(fn) - len(norm))
+                    if score < best_score:
+                        best = f; best_score = score
+            if best:
+                img = _load_tn_image(best, 64)
+                if img:
+                    safe = "".join(c if c.isalnum() or c in " _-" else "_" for c in name)
+                    try:
+                        img.save(str(dest / f"{safe}.png")); ok += 1
+                    except Exception:
+                        skip += 1
+                    continue
+            skip += 1
+        self._status.set(f"{folder} icons exported: {ok} saved, {skip} skipped → {dest}")
+
 
 # ═══════════════════════════════════════════════════════════════════════════════
 #  SPELLS TAB  (reworked: icons + talisman combos + variants)
@@ -1811,6 +1925,77 @@ def _load_talisman_icons(size: int = 24) -> Dict[str, Optional["ImageTk.PhotoIma
     return result
 
 
+def _bgr555_fast(px: bytes, w: int, h: int) -> "Image.Image":
+    """BGR555 → RGBA; uses numpy if available for large images."""
+    try:
+        import numpy as np
+        arr  = np.frombuffer(px, dtype='<u2').reshape(h, w)
+        r    = ((arr >> 10) & 0x1F).astype(np.uint8) << 3
+        g    = ((arr >>  5) & 0x1F).astype(np.uint8) << 3
+        b    = (arr         & 0x1F).astype(np.uint8) << 3
+        a    = np.where(arr == 0, np.uint8(0), np.uint8(255))
+        rgba = np.stack([r, g, b, a], axis=-1)
+        return Image.fromarray(rgba, 'RGBA')
+    except ImportError:
+        pass
+    img = Image.new('RGBA', (w, h))
+    pix = img.load()
+    for idx in range(w * h):
+        word = struct.unpack_from('<H', px, idx * 2)[0]
+        r = ((word >> 10) & 0x1F) << 3
+        g = ((word >>  5) & 0x1F) << 3
+        b = ( word        & 0x1F) << 3
+        pix[idx % w, idx // w] = (r, g, b, 0 if word == 0 else 255)
+    return img
+
+
+def _decode_dat_frame(dat_path: Path, frame_idx: int,
+                      size: Optional[int] = None) -> Optional["Image.Image"]:
+    """Decode frame_idx from a multi-frame CGSR .dat file (RGB555 direct pixels).
+
+    Format: [CGSR magic][count:1][flags:3][total:4][total:4]
+            [count×4 LE offsets starting at byte 16][data section]
+    Each frame starts with a 4-byte size prefix then TBitmapData at offset +4.
+    TBitmapData: width(4)+height(4)+...+datasize(4 at +68) + pixels at +72.
+    Pixels are BGR555 16-bit when palsize==0 and datasize==w*h*2.
+    """
+    if not HAS_PIL:
+        return None
+    try:
+        from PIL import Image as _Image
+        raw = dat_path.read_bytes()
+        if len(raw) < 20 or raw[:4] != b'CGSR':
+            return None
+        n = raw[4]
+        if frame_idx < 0 or frame_idx >= n:
+            return None
+        offsets = [struct.unpack_from('<I', raw, 16 + i * 4)[0] for i in range(n)]
+        data_start = 16 + n * 4
+        abs_off = data_start + offsets[frame_idx]
+        next_off = (data_start + offsets[frame_idx + 1]
+                    if frame_idx + 1 < n else len(raw))
+        fd = raw[abs_off:next_off]
+        # Scan entire frame for TBitmapData (n=1 files pack data at large offsets)
+        for i in range(0, max(0, len(fd) - 76), 4):
+            w = struct.unpack_from('<i', fd, i)[0]
+            h = struct.unpack_from('<i', fd, i + 4)[0]
+            if not (1 <= w <= 2048 and 1 <= h <= 2048):
+                continue
+            palsize  = struct.unpack_from('<I', fd, i + 60)[0]
+            datasize = struct.unpack_from('<I', fd, i + 68)[0]
+            if palsize == 0 and datasize == w * h * 2:
+                if i + 72 + datasize > len(fd):
+                    continue
+                px  = fd[i + 72: i + 72 + datasize]
+                img = _bgr555_fast(px, w, h)
+                if size and (w, h) != (size, size):
+                    img = img.resize((size, size), _Image.LANCZOS)
+                return img
+    except Exception:
+        pass
+    return None
+
+
 class SpellsTab(tk.Frame):
     def __init__(self, parent, status: StatusBar):
         super().__init__(parent, bg=BG_MID)
@@ -1818,7 +2003,9 @@ class SpellsTab(tk.Frame):
         self._spells   = []
         self._talis_ph : Dict[str, "ImageTk.PhotoImage"] = {}
         self._spell_ph : Dict[str, "ImageTk.PhotoImage"] = {}
+        self._slot_ph  : Optional["ImageTk.PhotoImage"] = None   # spell slot badge
         self._variant_talis_widgets: list = []   # kept alive
+        self._export_stop = False
         self._build_ui()
         self.after(400, self._load_all)
 
@@ -1833,6 +2020,11 @@ class SpellsTab(tk.Frame):
                  font=("Segoe UI", 10), relief="flat", width=20
                  ).pack(side="left", padx=4)
         self._flt_var.trace_add("write", self._filter)
+        self._export_btn = tk.Button(bar, text="Export All Icons", bg=ACCENT2,
+                                     fg="#000", relief="flat",
+                                     font=("Segoe UI", 9, "bold"), padx=8,
+                                     command=self._export_all)
+        self._export_btn.pack(side="right", padx=4)
         self._count_lbl = tk.Label(bar, text="", bg=BG_DARK, fg=FG_DIM,
                                    font=("Segoe UI", 9))
         self._count_lbl.pack(side="right", padx=12)
@@ -1863,11 +2055,13 @@ class SpellsTab(tk.Frame):
         right = tk.Frame(pane, bg=BG_PANEL)
         pane.add(right, minsize=380)
 
-        # Header row: icon + name
+        # Header row: icon + slot badge + name
         hdr = tk.Frame(right, bg=BG_PANEL, padx=10, pady=8)
         hdr.pack(fill="x")
         self._icon_lbl = tk.Label(hdr, bg=BG_PANEL)
-        self._icon_lbl.pack(side="left", padx=(0, 10))
+        self._icon_lbl.pack(side="left", padx=(0, 4))
+        self._slot_badge_lbl = tk.Label(hdr, bg=BG_PANEL)
+        self._slot_badge_lbl.pack(side="left", padx=(0, 10))
         name_frame = tk.Frame(hdr, bg=BG_PANEL)
         name_frame.pack(side="left", fill="x", expand=True)
         self._spell_name_lbl = tk.Label(name_frame, text="Select a spell",
@@ -1894,6 +2088,10 @@ class SpellsTab(tk.Frame):
         self._spells = parse_spell_def()
         if HAS_PIL:
             self._talis_ph = _load_talisman_icons(size=28)
+            # Load spell-slot badge from bottombar.dat frame 2 (42×42)
+            slot_img = _decode_dat_frame(RESOURCES / "bottombar.dat", 2, size=32)
+            if slot_img:
+                self._slot_ph = ImageTk.PhotoImage(slot_img)
         self._populate(self._spells)
         self._count_lbl.config(text=f"{len(self._spells)} spells")
         self._status.set(f"Spells loaded: {len(self._spells)}")
@@ -1926,7 +2124,7 @@ class SpellsTab(tk.Frame):
         self._spell_name_lbl.config(text=s["name"])
         self._spell_desc_lbl.config(text=s.get("description", ""))
 
-        # Icon
+        # Icon + slot badge
         if HAS_PIL:
             icon_name = s.get("icon_name", s["name"])
             if icon_name not in self._spell_ph:
@@ -1942,6 +2140,12 @@ class SpellsTab(tk.Frame):
             else:
                 self._icon_lbl.config(image="", text="?", fg=FG_MUTED,
                                       font=("Segoe UI", 22), width=3)
+            # Slot badge: show bottombar slot frame if available
+            if self._slot_ph:
+                self._slot_badge_lbl.config(image=self._slot_ph)
+                self._slot_badge_lbl._ph = self._slot_ph
+            else:
+                self._slot_badge_lbl.config(image="")
 
         # ── Body: clear and rebuild ───────────────────────────────────────────
         for w in self._body.winfo_children():
@@ -1965,7 +2169,28 @@ class SpellsTab(tk.Frame):
         _sect("STATS")
         dt = DAMAGE_TYPE_NAMES.get(s.get("damage_type", ""), s.get("damage_type", ""))
         _row("Damage type", dt or "—")
-        _row("Animation",   s.get("animation") or "—")
+
+        # Animation row with linked .i3d file
+        anim = s.get("animation", "")
+        if anim:
+            model_file = _spell_anim_model(anim)
+            af = tk.Frame(self._body, bg=BG_PANEL)
+            af.pack(fill="x", padx=10, pady=1)
+            tk.Label(af, text="Animation:", bg=BG_PANEL, fg=ACCENT2,
+                     font=("Segoe UI", 9), width=16, anchor="w").pack(side="left")
+            tk.Label(af, text=anim, bg=BG_PANEL, fg=FG_TEXT,
+                     font=("Consolas", 9), anchor="w").pack(side="left")
+            if model_file and model_file.exists():
+                def _open_model(p=model_file):
+                    import subprocess, os
+                    subprocess.Popen(["explorer", "/select,", str(p)])
+                tk.Button(af, text=f"  {model_file.name}  ", bg=BG_CARD,
+                          fg=ACCENT2, relief="flat", cursor="hand2",
+                          font=("Segoe UI", 8), command=_open_model
+                          ).pack(side="left", padx=6)
+        else:
+            _row("Animation", "—")
+
         if s.get("damage"):
             _row("Damage",  s["damage"])
         if s.get("duration"):
@@ -2019,6 +2244,70 @@ class SpellsTab(tk.Frame):
                     tk.Label(ef, text=v["effect"], bg=BG_CARD, fg=ACCENT3,
                              font=("Consolas", 8)).pack(side="left", padx=4)
 
+    # ── Batch export ──────────────────────────────────────────────────────────
+    def _export_all(self):
+        if not HAS_PIL:
+            self._status.set("PIL not available")
+            return
+        if not self._spells:
+            self._status.set("No spells loaded")
+            return
+        dest = RENDERS_DIR / "SpellIcons"
+        dest.mkdir(parents=True, exist_ok=True)
+        total = len(self._spells)
+        self._export_stop = False
+        self._export_btn.config(text="Stop", bg=RED,
+                                command=lambda: setattr(self, '_export_stop', True))
+
+        def _worker():
+            ok = skip = 0
+            for i, s in enumerate(self._spells, 1):
+                if self._export_stop:
+                    break
+                icon_name = s.get("icon_name", s["name"])
+                img = _load_spell_icon(icon_name, size=64)
+                if img:
+                    out = dest / f"{icon_name}.png"
+                    try:
+                        img.save(str(out)); ok += 1
+                    except Exception:
+                        skip += 1
+                else:
+                    skip += 1
+                if i % 10 == 0 or i == total:
+                    self.after(0, lambda n=i: self._status.set(
+                        f"Exporting spell icons: {n}/{total}…"))
+            self.after(0, self._on_export_done, ok, skip, dest)
+
+        threading.Thread(target=_worker, daemon=True).start()
+
+    def _on_export_done(self, ok: int, skip: int, dest: Path):
+        self._export_btn.config(text="Export All Icons", bg=ACCENT2,
+                                command=self._export_all)
+        self._status.set(f"Spell icons: {ok} saved, {skip} skipped → {dest}")
+
+
+def _spell_anim_model(anim_name: str) -> Optional[Path]:
+    """Return the most relevant .i3d model file for a spell animation name."""
+    chars_dir = IMAGERY_ASSETS / "Chars"
+    candidates = {
+        "invoke1": "invoker.i3d", "invoke2": "invoker.i3d",
+        "invoke3": "invoker.i3d", "invoke4": "invoker.i3d",
+        "invoke5": "invoker.i3d", "cinv1":   "invoker.i3d",
+        "Vomit":   "zombie.i3d",
+    }
+    fname = candidates.get(anim_name)
+    if fname:
+        p = chars_dir / fname
+        if p.exists():
+            return p
+    # Generic fallback: search for model whose name contains the anim name
+    anim_lower = anim_name.lower()
+    for f in chars_dir.glob("*.i3d"):
+        if anim_lower in f.stem.lower():
+            return f
+    return None
+
 
 # ═══════════════════════════════════════════════════════════════════════════════
 #  SCRIPTS TAB
@@ -2044,6 +2333,10 @@ class ScriptsTab(tk.Frame):
                   ).pack(side="left", padx=4)
         tk.Button(bar, text="Search", command=self._do_search,
                   bg=ACCENT2, fg="white", relief="flat",
+                  font=("Segoe UI", 9, "bold"), padx=8
+                  ).pack(side="left", padx=4)
+        tk.Button(bar, text="Export All .def", command=self._export_all,
+                  bg=ACCENT3, fg="#000", relief="flat",
                   font=("Segoe UI", 9, "bold"), padx=8
                   ).pack(side="left", padx=4)
         self._count_lbl = tk.Label(bar, text="", bg=BG_DARK, fg=FG_DIM,
@@ -2233,6 +2526,22 @@ class ScriptsTab(tk.Frame):
             self._content_text.configure(state="normal")
             self._content_text.see(f"{lineno}.0")
             self._content_text.configure(state="disabled")
+
+    def _export_all(self):
+        if not self._def_files:
+            self._status.set("No .def files loaded")
+            return
+        dest = RENDERS_DIR / "Scripts"
+        dest.mkdir(parents=True, exist_ok=True)
+        ok = skip = 0
+        for path in self._def_files:
+            try:
+                import shutil
+                shutil.copy2(str(path), str(dest / path.name))
+                ok += 1
+            except Exception:
+                skip += 1
+        self._status.set(f"Scripts exported: {ok} files → {dest}")
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -2710,6 +3019,11 @@ class ModelsTab(tk.Frame):
                   font=("Segoe UI", 10), relief="flat", width=24
                   ).pack(side="left", padx=4)
         self._flt_var.trace_add("write", self._filter)
+        self._batch_btn = tk.Button(bar, text="Batch Export OBJ", bg=ACCENT3,
+                                     fg="#000", relief="flat",
+                                     font=("Segoe UI", 9, "bold"), padx=8,
+                                     command=self._batch_export_obj)
+        self._batch_btn.pack(side="right", padx=4)
         self._count_lbl = tk.Label(bar, text="", bg=BG_DARK, fg=FG_DIM,
                                     font=("Segoe UI", 9))
         self._count_lbl.pack(side="right", padx=12)
@@ -3163,6 +3477,49 @@ class ModelsTab(tk.Frame):
             self.after(0, lambda m=msg: self._status.set(m))
 
         threading.Thread(target=_worker, daemon=True).start()
+
+    def _batch_export_obj(self):
+        """Export all currently listed models as OBJ files."""
+        models = self._models if self._models else []
+        if not models:
+            self._status.set("No models loaded")
+            return
+        dest = RENDERS_DIR / "Models_OBJ"
+        dest.mkdir(parents=True, exist_ok=True)
+        total = len(models)
+        self._batch_btn.config(text="Stop batch…", bg=RED,
+                               command=lambda: setattr(self, '_batch_stop', True))
+        self._batch_stop = False
+
+        def _worker():
+            ok = skip = 0
+            for i, m in enumerate(models, 1):
+                if getattr(self, '_batch_stop', False):
+                    break
+                path = m.get("path")
+                if not path or not path.is_file():
+                    skip += 1; continue
+                out = dest / f"{path.stem}.obj"
+                try:
+                    from decoders.i3d import decode_i3d_geometry, export_obj
+                    geom = decode_i3d_geometry(path)
+                    if geom and export_obj(geom, out):
+                        ok += 1
+                    else:
+                        skip += 1
+                except Exception:
+                    skip += 1
+                if i % 10 == 0 or i == total:
+                    self.after(0, lambda n=i: self._status.set(
+                        f"Batch OBJ: {n}/{total}…"))
+            self.after(0, self._on_batch_done, ok, skip, dest)
+
+        threading.Thread(target=_worker, daemon=True).start()
+
+    def _on_batch_done(self, ok: int, skip: int, dest: Path):
+        self._batch_btn.config(text="Batch Export OBJ", bg=ACCENT3,
+                               command=self._batch_export_obj)
+        self._status.set(f"Batch OBJ: {ok} exported, {skip} skipped → {dest}")
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -3816,18 +4173,859 @@ class CinematiXTab(tk.Frame):
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
+#  UI RESOURCES TAB
+# ═══════════════════════════════════════════════════════════════════════════════
+
+_UI_CATEGORIES: Dict[str, List[str]] = {
+    "Menus":        ["splash", "menus", "selstarttex", "selstartnotex",
+                     "ingamemenutex", "ingamemenunotex", "death", "credits",
+                     "demo", "exit"],
+    "Save / Load":  ["loadgametex", "loadgamenotex", "loadgamealpha", "loadbar",
+                     "savegametex", "savegamenotex", "savegamealpha",
+                     "userinfonotex", "userinfotex"],
+    "Character":    ["createchartex", "createcharnotex", "createcharalpha"],
+    "HUD":          ["bottombar", "health", "stamina", "startbar",
+                     "statusbar", "statusbarnotex", "sidepane",
+                     "sidebartabs", "sidebartabsnotex"],
+    "Inventory":    ["inventory", "equippane", "equipscr", "intrface",
+                     "book", "buysell", "gamedata", "scroll", "spellscroll",
+                     "spellpane", "spellicons", "automap"],
+    "Dialog":       ["dialog", "dlg", "dlgfont", "dlgfonts"],
+    "Fonts":        ["gamefont", "sysfont", "scrlfont", "smlfont", "gnrmfont"],
+    "Multiplayer":  ["hostgame", "joingame", "connect", "mpingame",
+                     "mpingamenotex", "mpingametex"],
+    "Gold / Items": ["medgold", "medgoldg", "medgoldglow", "medgolds",
+                     "medgoldsel", "medgoldshad", "medgoldsilv",
+                     "smallgold", "smallgoldg", "smallgoldglow", "smallgolds",
+                     "smallgoldsel", "smallgoldshad", "smallgoldsilv"],
+    "Widgets":      ["widgetstex", "widgetsnotex", "widgetsalpha", "imagery"],
+    "Editor (GCK)": ["editor"],
+}
+
+
+def _scan_dat_frames(path: Path) -> int:
+    """Return frame count from CGSR .dat header, 0 if not valid CGSR."""
+    try:
+        raw = path.read_bytes()
+        if len(raw) >= 5 and raw[:4] == b'CGSR':
+            return raw[4]
+    except Exception:
+        pass
+    return 0
+
+
+class UIResourcesTab(tk.Frame):
+    _THUMB = 80   # element tile size
+    _BG_W  = 480  # preview max width
+    _BG_H  = 320  # preview max height
+
+    def __init__(self, parent, status: StatusBar):
+        super().__init__(parent, bg=BG_MID)
+        self._status      = status
+        self._dat_files   : Dict[str, Path] = {}
+        self._raw_imgs    : List[Optional["Image.Image"]] = []
+        self._thumb_phs   : List["ImageTk.PhotoImage"] = []
+        self._cur_file    : Optional[Path] = None
+        self._cur_frame   : int = 0
+        self._bg_idx      : int = 0
+        self._anim_id     : Optional[str] = None
+        self._playing     : bool = False
+        self._fps_var     : tk.IntVar
+        self._export_stop : bool = False
+        self._build_ui()
+        self.after(300, self._load_files)
+
+    # ── Layout ───────────────────────────────────────────────────────────────
+
+    def _build_ui(self):
+        # Top toolbar
+        bar = tk.Frame(self, bg=BG_DARK, pady=4)
+        bar.pack(fill="x")
+        tk.Label(bar, text="UI Resources", bg=BG_DARK, fg=ACCENT,
+                 font=("Segoe UI", 11, "bold")).pack(side="left", padx=10)
+        self._count_lbl = tk.Label(bar, text="", bg=BG_DARK, fg=FG_DIM,
+                                   font=("Segoe UI", 9))
+        self._count_lbl.pack(side="left", padx=6)
+        tk.Button(bar, text="Export All UI", bg=ACCENT3, fg="#000",
+                  relief="flat", font=("Segoe UI", 9, "bold"), padx=8,
+                  command=self._export_all).pack(side="right", padx=4)
+        tk.Button(bar, text="Export Frames", bg=ACCENT2, fg="#000",
+                  relief="flat", font=("Segoe UI", 9, "bold"), padx=8,
+                  command=self._export_file).pack(side="right", padx=4)
+
+        # Horizontal split: tree | content
+        pane = tk.PanedWindow(self, orient="horizontal", bg=BG_DARK,
+                              sashwidth=4, sashpad=0)
+        pane.pack(fill="both", expand=True)
+
+        # ── Left: category tree ──────────────────────────────────────────────
+        left = tk.Frame(pane, bg=BG_PANEL, width=220)
+        pane.add(left, minsize=160)
+        tk.Label(left, text="Files", bg=BG_PANEL, fg=FG_DIM,
+                 font=("Segoe UI", 9, "bold")).pack(anchor="w", padx=8, pady=(4, 0))
+        sb_tv = ttk.Scrollbar(left, orient="vertical")
+        sb_tv.pack(side="right", fill="y")
+        self._tv = ttk.Treeview(left, yscrollcommand=sb_tv.set,
+                                selectmode="browse", show="tree")
+        sb_tv.config(command=self._tv.yview)
+        self._tv.pack(fill="both", expand=True)
+        self._tv.bind("<<TreeviewSelect>>", self._on_select)
+
+        # ── Right: vertical split — preview top, tile grid bottom ────────────
+        right = tk.Frame(pane, bg=BG_DARK)
+        pane.add(right, minsize=500)
+
+        v_pane = tk.PanedWindow(right, orient="vertical", bg=BG_DARK,
+                                sashwidth=5)
+        v_pane.pack(fill="both", expand=True)
+
+        # ─ Preview panel ─────────────────────────────────────────────────────
+        preview_outer = tk.Frame(v_pane, bg=BG_DARK)
+        v_pane.add(preview_outer, minsize=180)
+
+        # Info + animate controls on one bar above the canvas
+        pbar = tk.Frame(preview_outer, bg=BG_MID, pady=3)
+        pbar.pack(fill="x")
+        self._file_lbl = tk.Label(pbar, text="Select a file", bg=BG_MID,
+                                  fg=ACCENT, font=("Segoe UI", 10, "bold"))
+        self._file_lbl.pack(side="left", padx=10)
+        self._info_lbl = tk.Label(pbar, text="", bg=BG_MID, fg=FG_DIM,
+                                  font=("Segoe UI", 9))
+        self._info_lbl.pack(side="left", padx=6)
+
+        self._fps_var = tk.IntVar(value=8)
+        self._play_btn = tk.Button(pbar, text="▶ Animate", bg=BG_MID,
+                                   fg=FG_TEXT, relief="flat",
+                                   font=("Segoe UI", 8), padx=6,
+                                   command=self._toggle_play)
+        self._play_btn.pack(side="right", padx=4)
+        tk.Spinbox(pbar, from_=1, to=30, textvariable=self._fps_var,
+                   bg=BG_PANEL, fg=FG_TEXT, buttonbackground=BG_MID,
+                   relief="flat", width=3,
+                   font=("Segoe UI", 8)).pack(side="right", padx=(0, 2))
+        tk.Label(pbar, text="fps", bg=BG_MID, fg=FG_DIM,
+                 font=("Segoe UI", 8)).pack(side="right")
+
+        # Large preview canvas (background / selected element)
+        self._preview_canvas = tk.Canvas(preview_outer, bg="#080812",
+                                         bd=0, highlightthickness=0)
+        self._preview_canvas.pack(fill="both", expand=True, padx=6, pady=(0, 4))
+        self._preview_canvas.bind("<Configure>", lambda e: self._draw_preview())
+
+        # ─ Tile grid ─────────────────────────────────────────────────────────
+        grid_outer = tk.Frame(v_pane, bg=BG_DARK)
+        v_pane.add(grid_outer, minsize=120)
+
+        gbar = tk.Frame(grid_outer, bg=BG_MID, pady=2)
+        gbar.pack(fill="x")
+        self._grid_lbl = tk.Label(gbar, text="Elements", bg=BG_MID,
+                                  fg=ACCENT2, font=("Segoe UI", 9, "bold"))
+        self._grid_lbl.pack(side="left", padx=10)
+        self._frame_nav = tk.Label(gbar, text="", bg=BG_MID, fg=FG_DIM,
+                                   font=("Segoe UI", 8))
+        self._frame_nav.pack(side="left", padx=6)
+
+        h_sb = ttk.Scrollbar(grid_outer, orient="horizontal")
+        h_sb.pack(side="bottom", fill="x")
+        v_sb = ttk.Scrollbar(grid_outer, orient="vertical")
+        v_sb.pack(side="right", fill="y")
+        self._grid_canvas = tk.Canvas(grid_outer, bg=BG_DARK, bd=0,
+                                      highlightthickness=0,
+                                      xscrollcommand=h_sb.set,
+                                      yscrollcommand=v_sb.set)
+        self._grid_canvas.pack(fill="both", expand=True)
+        h_sb.config(command=self._grid_canvas.xview)
+        v_sb.config(command=self._grid_canvas.yview)
+        self._grid_inner = tk.Frame(self._grid_canvas, bg=BG_DARK)
+        self._grid_win = self._grid_canvas.create_window(
+            (0, 0), window=self._grid_inner, anchor="nw")
+        self._grid_inner.bind("<Configure>", lambda e:
+            self._grid_canvas.configure(
+                scrollregion=self._grid_canvas.bbox("all")))
+        self._grid_canvas.bind("<Configure>", lambda e:
+            self._grid_canvas.itemconfig(self._grid_win, width=e.width))
+
+    # ── Data loading ──────────────────────────────────────────────────────────
+
+    def _load_files(self):
+        self._dat_files.clear()
+        for p in sorted(RESOURCES.glob("*.dat")):
+            self._dat_files[p.stem.lower()] = p
+        for p in sorted(IMAGERY.glob("*.dat")):
+            if p.stem.lower() not in self._dat_files:
+                self._dat_files[p.stem.lower()] = p
+
+        stem_to_cat: Dict[str, str] = {}
+        for cat, stems in _UI_CATEGORIES.items():
+            for s in stems:
+                stem_to_cat[s.lower()] = cat
+
+        buckets: Dict[str, List[tuple]] = {c: [] for c in _UI_CATEGORIES}
+        buckets["Misc"] = []
+        for stem, path in sorted(self._dat_files.items()):
+            cat = stem_to_cat.get(stem, "Misc")
+            n = _scan_dat_frames(path)
+            buckets.setdefault(cat, []).append((stem, path, n))
+
+        self._tv.delete(*self._tv.get_children())
+        total = 0
+        for cat in list(_UI_CATEGORIES.keys()) + ["Misc"]:
+            items = buckets.get(cat, [])
+            if not items:
+                continue
+            node = self._tv.insert("", "end",
+                                   text=f"  {cat}  ({len(items)})",
+                                   open=False, tags=("cat",))
+            for stem, path, n in items:
+                tag = f"  {stem}.dat" + (f"  [{n}f]" if n else "  [?]")
+                self._tv.insert(node, "end", text=tag,
+                                values=(str(path),), tags=("file",))
+                total += 1
+
+        self._tv.tag_configure("cat",  foreground=ACCENT2,
+                               font=("Segoe UI", 9, "bold"))
+        self._tv.tag_configure("file", foreground=FG_TEXT,
+                               font=("Segoe UI", 9))
+        self._count_lbl.config(text=f"{total} .dat files")
+
+    # ── Selection / display ───────────────────────────────────────────────────
+
+    def _on_select(self, _=None):
+        sel = self._tv.selection()
+        if not sel:
+            return
+        vals = self._tv.item(sel[0], "values")
+        if not vals:
+            return
+        path = Path(vals[0])
+        if path != self._cur_file:
+            self._stop_anim()
+            self._cur_file = path
+            self._show_file(path)
+
+    def _show_file(self, path: Path):
+        self._stop_anim()
+        self._file_lbl.config(text=path.name)
+        self._info_lbl.config(text="Decoding…")
+        for w in self._grid_inner.winfo_children():
+            w.destroy()
+        self._raw_imgs.clear()
+        self._thumb_phs.clear()
+        self._cur_frame = 0
+
+        n = _scan_dat_frames(path)
+        if not HAS_PIL or n == 0:
+            self._info_lbl.config(text="Not CGSR / PIL unavailable")
+            self._preview_canvas.delete("all")
+            return
+
+        # Decode all frames using fast BGR555 path
+        for i in range(n):
+            img = _decode_dat_frame(path, i)
+            # If standard decoder got it, convert pixels via fast path for large images
+            self._raw_imgs.append(img)
+
+        valid = [(i, img) for i, img in enumerate(self._raw_imgs) if img]
+        if not valid:
+            self._info_lbl.config(text=f"{n} frames — no decodable images")
+            self._preview_canvas.delete("all")
+            return
+
+        # Background = largest image by area
+        self._bg_idx, bg_img = max(valid, key=lambda t: t[1].width * t[1].height)
+
+        # Detect font file: all images narrow & short (glyph sheet)
+        all_glyphs = all(img.width <= 24 and img.height <= 32 for _, img in valid)
+        if all_glyphs and len(valid) >= 20:
+            self._show_font_map(valid)
+            return
+
+        # Info bar
+        n_elem = len(valid) - 1
+        self._info_lbl.config(
+            text=f"{bg_img.width}×{bg_img.height} BG  |  "
+                 f"{n_elem} element{'s' if n_elem != 1 else ''}  |  {n} frames")
+        self._grid_lbl.config(text="Elements")
+
+        # Build tile grid (only valid images shown)
+        THUMB = self._THUMB
+        cw = self._grid_canvas.winfo_width() or (8 * (THUMB + 10))
+        cols = max(1, cw // (THUMB + 10))
+
+        for gi, (fi, img) in enumerate(valid):
+            is_bg = (fi == self._bg_idx)
+            t = img.copy()
+            t.thumbnail((THUMB, THUMB))
+            ph = ImageTk.PhotoImage(t)
+            self._thumb_phs.append(ph)
+
+            hl_bg   = ACCENT  if is_bg else BG_CARD
+            hl_brd  = ACCENT  if is_bg else BORDER
+            fg_lbl  = "#000"  if is_bg else FG_DIM
+
+            cell = tk.Frame(self._grid_inner, bg=hl_bg,
+                            highlightthickness=2,
+                            highlightbackground=hl_brd)
+            cell.grid(row=gi // cols, column=gi % cols, padx=4, pady=4)
+
+            img_lbl = tk.Label(cell, image=ph, bg=hl_bg,
+                               width=THUMB, height=THUMB)
+            img_lbl.image = ph
+            img_lbl.pack(padx=2, pady=(2, 0))
+
+            tag  = "BG" if is_bg else f"f{fi}"
+            dims = f"{img.width}×{img.height}"
+            tk.Label(cell, text=f"{tag}  {dims}", bg=hl_bg, fg=fg_lbl,
+                     font=("Segoe UI", 7, "bold" if is_bg else "normal")).pack(pady=(0, 2))
+
+            for w in (img_lbl, cell):
+                w.bind("<Button-1>", lambda e, idx=fi: self._select_frame(idx))
+
+        self._frame_nav.config(text=f"{len(valid)} images")
+        self._select_frame(self._bg_idx)
+
+    def _show_font_map(self, valid: List[Tuple[int, "Image.Image"]]):
+        """Display glyph sheet — one tile per character glyph in ASCII order."""
+        self._grid_lbl.config(text="Font Glyphs")
+        # ASCII printable starts at 32 (space); glyph f1 = ASCII 32
+        # gamefont.dat frame 0 is metadata, frames 1..86 = glyphs for ASCII 32..117
+        COLS = 16
+        for gi, (fi, img) in enumerate(valid):
+            char_code = 31 + fi   # frame 1 → ASCII 32 = space
+            char = chr(char_code) if 32 <= char_code <= 126 else "?"
+            scale = max(1, 40 // max(img.width, img.height, 1))
+            nw, nh = img.width * scale, img.height * scale
+            ph = ImageTk.PhotoImage(img.resize((nw, nh), Image.NEAREST))
+            self._thumb_phs.append(ph)
+
+            cell = tk.Frame(self._grid_inner, bg=BG_CARD,
+                            highlightthickness=1, highlightbackground=BORDER)
+            cell.grid(row=gi // COLS, column=gi % COLS, padx=2, pady=2)
+
+            tk.Label(cell, image=ph, bg=BG_CARD,
+                     width=40, height=40).pack()
+            tk.Label(cell, text=f"'{char}'", bg=BG_CARD, fg=ACCENT2,
+                     font=("Consolas", 7)).pack()
+            cell._ph = ph
+
+        total = len(valid)
+        self._info_lbl.config(text=f"{total} glyphs  (font)")
+        self._frame_nav.config(text=f"ASCII {32}–{31+total}")
+        # Show first glyph in preview
+        self._select_frame(valid[0][0] if valid else 0)
+
+    def _select_frame(self, idx: int):
+        self._cur_frame = idx
+        n = len(self._raw_imgs)
+        self._frame_nav.config(text=f"f{idx}  |  {n} frames")
+        self._draw_preview()
+
+    def _draw_preview(self):
+        c = self._preview_canvas
+        c.delete("all")
+        imgs = self._raw_imgs
+        if not imgs or self._cur_frame >= len(imgs):
+            return
+        img = imgs[self._cur_frame]
+        if not img:
+            cw, ch = max(1, c.winfo_width()), max(1, c.winfo_height())
+            c.create_text(cw // 2, ch // 2,
+                          text="(metadata frame — no image)",
+                          fill=FG_MUTED, font=("Segoe UI", 10))
+            return
+        cw = max(1, c.winfo_width())
+        ch = max(1, c.winfo_height())
+        # Never upscale beyond 2× for crisp pixel art; downscale freely
+        scale = min(cw / img.width, ch / img.height, 2.0)
+        nw = max(1, int(img.width  * scale))
+        nh = max(1, int(img.height * scale))
+        mode = Image.NEAREST if scale >= 1.5 else Image.LANCZOS
+        ph = ImageTk.PhotoImage(img.resize((nw, nh), mode))
+        c.create_image(cw // 2, ch // 2, image=ph, anchor="center")
+        c._ph = ph
+        # Dimension overlay bottom-left
+        c.create_text(8, ch - 8,
+                      text=f"{img.width}×{img.height}",
+                      fill=FG_DIM, font=("Segoe UI", 8), anchor="sw")
+
+    # ── Animation ─────────────────────────────────────────────────────────────
+
+    def _toggle_play(self):
+        if self._playing:
+            self._stop_anim()
+        else:
+            self._start_anim()
+
+    def _start_anim(self):
+        valid = [i for i, img in enumerate(self._raw_imgs) if img]
+        if len(valid) < 2:
+            return
+        self._anim_valid = valid
+        self._anim_vi    = 0
+        self._playing    = True
+        self._play_btn.config(text="■ Stop")
+        self._anim_tick()
+
+    def _anim_tick(self):
+        if not self._playing:
+            return
+        self._anim_vi = (self._anim_vi + 1) % len(self._anim_valid)
+        self._select_frame(self._anim_valid[self._anim_vi])
+        delay = max(33, 1000 // max(1, self._fps_var.get()))
+        self._anim_id = self.after(delay, self._anim_tick)
+
+    def _stop_anim(self):
+        self._playing = False
+        self._play_btn.config(text="▶ Animate")
+        if self._anim_id:
+            self.after_cancel(self._anim_id)
+            self._anim_id = None
+
+    # ── Export ────────────────────────────────────────────────────────────────
+
+    def _export_file(self):
+        if not self._cur_file or not self._raw_imgs:
+            self._status.set("No file selected")
+            return
+        dest = RENDERS_DIR / "UI" / self._cur_file.stem
+        dest.mkdir(parents=True, exist_ok=True)
+        ok = 0
+        for i, img in enumerate(self._raw_imgs):
+            if img:
+                try:
+                    img.save(str(dest / f"frame_{i:03d}.png"))
+                    ok += 1
+                except Exception:
+                    pass
+        self._status.set(f"Exported {ok} frames → {dest}")
+
+    def _export_all(self):
+        if not self._dat_files:
+            self._status.set("No files loaded")
+            return
+        self._export_stop = False
+        dest_root = RENDERS_DIR / "UI"
+        files = sorted(self._dat_files.items())
+        total = len(files)
+
+        def _worker():
+            ok_files = ok_frames = 0
+            for i, (stem, path) in enumerate(files, 1):
+                if self._export_stop:
+                    break
+                n = _scan_dat_frames(path)
+                if n == 0:
+                    continue
+                dest = dest_root / stem
+                dest.mkdir(parents=True, exist_ok=True)
+                for fi in range(n):
+                    img = _decode_dat_frame(path, fi)
+                    if img:
+                        try:
+                            img.save(str(dest / f"frame_{fi:03d}.png"))
+                            ok_frames += 1
+                        except Exception:
+                            pass
+                ok_files += 1
+                self.after(0, lambda i=i: self._status.set(
+                    f"Exporting UI: {i}/{total} files…"))
+            self.after(0, lambda: self._status.set(
+                f"UI export done — {ok_files} files, {ok_frames} frames → {dest_root}"))
+
+        threading.Thread(target=_worker, daemon=True).start()
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+#  AHKUILON TAB  (zone scripts + object coordinate map)
+# ═══════════════════════════════════════════════════════════════════════════════
+
+_SCRIPT_KW: Dict[str, re.Pattern] = {
+    "block":   re.compile(r'\b(OBJECT|BEGIN|END)\b'),
+    "trigger": re.compile(r'\b(CUBE|SPHERE|CYLINDER)\b'),
+    "action":  re.compile(r'\b(FADESCREENOUT|FADESCREENIN|WAIT|SCREENFADE)\b'),
+    "cmd":     re.compile(r'\b(DIALOG|CINEMATIC|STARTQUEST|ENDQUEST|PLAYSOUND|TELEPORT|POS)\b'),
+    "prop":    re.compile(r'\b(player|PLAYER|HEALTH|GOLD)\b'),
+    "number":  re.compile(r'(?<!\w)-?\d+(?:\.\d+)?(?!\w)'),
+    "comment": re.compile(r'//.*'),
+    "string":  re.compile(r'"[^"]*"'),
+}
+
+_CUBE_RE   = re.compile(
+    r'CUBE\s+\w+\s+(-?\d+),(-?\d+),(-?\d+)\s+(-?\d+),(-?\d+),(-?\d+)',
+    re.IGNORECASE)
+_OBJECT_RE = re.compile(r'OBJECT\s+"([^"]+)"', re.IGNORECASE)
+
+
+def _parse_script_objects(text: str) -> List[Dict]:
+    objects: List[Dict] = []
+    current = None
+    for line in text.splitlines():
+        m = _OBJECT_RE.search(line)
+        if m:
+            current = m.group(1)
+        c = _CUBE_RE.search(line)
+        if c and current is not None:
+            x1, y1, z1, x2, y2, z2 = (int(c.group(i)) for i in range(1, 7))
+            objects.append({
+                "name": current,
+                "x1": x1, "y1": y1, "x2": x2, "y2": y2,
+                "cx": (x1 + x2) // 2, "cy": (y1 + y2) // 2,
+            })
+    return objects
+
+
+class AhkuilonTab(tk.Frame):
+    _AREAS = ["arakna", "cave", "dungeon", "forest", "keep",
+              "labyrinth", "ruins", "town", "tower"]
+
+    def __init__(self, parent, status: StatusBar):
+        super().__init__(parent, bg=BG_MID)
+        self._status   = status
+        self._cur_path : Optional[Path] = None
+        self._objects  : List[Dict] = []
+        self._map_dots : List[Tuple] = []
+        self._build_ui()
+        self.after(300, self._load_files)
+
+    def _build_ui(self):
+        bar = tk.Frame(self, bg=BG_DARK, pady=4)
+        bar.pack(fill="x")
+        tk.Label(bar, text="Ahkuilon — Zone Scripts", bg=BG_DARK, fg=ACCENT,
+                 font=("Segoe UI", 11, "bold")).pack(side="left", padx=10)
+        self._count_lbl = tk.Label(bar, text="", bg=BG_DARK, fg=FG_DIM,
+                                   font=("Segoe UI", 9))
+        self._count_lbl.pack(side="left", padx=8)
+        tk.Button(bar, text="Export Scripts", bg=ACCENT2, fg="#000",
+                  relief="flat", font=("Segoe UI", 9, "bold"), padx=8,
+                  command=self._export_all).pack(side="right", padx=4)
+
+        pane = tk.PanedWindow(self, orient="horizontal", bg=BG_DARK,
+                              sashwidth=4)
+        pane.pack(fill="both", expand=True)
+
+        # Left: file tree
+        left = tk.Frame(pane, bg=BG_PANEL, width=200)
+        pane.add(left, minsize=150)
+        tk.Label(left, text="Scripts", bg=BG_PANEL, fg=FG_DIM,
+                 font=("Segoe UI", 9, "bold")).pack(anchor="w", padx=8, pady=(4, 0))
+        sb = ttk.Scrollbar(left, orient="vertical")
+        sb.pack(side="right", fill="y")
+        self._tv = ttk.Treeview(left, yscrollcommand=sb.set,
+                                selectmode="browse", show="tree")
+        sb.config(command=self._tv.yview)
+        self._tv.pack(fill="both", expand=True)
+        self._tv.bind("<<TreeviewSelect>>", self._on_select)
+
+        # Right: text + map
+        right = tk.Frame(pane, bg=BG_DARK)
+        pane.add(right, minsize=500)
+
+        v_pane = tk.PanedWindow(right, orient="vertical", bg=BG_DARK,
+                                sashwidth=4)
+        v_pane.pack(fill="both", expand=True)
+
+        # Text viewer
+        txt_frame = tk.Frame(v_pane, bg=BG_PANEL)
+        v_pane.add(txt_frame, minsize=200)
+
+        info_bar = tk.Frame(txt_frame, bg=BG_MID, pady=3)
+        info_bar.pack(fill="x")
+        self._file_lbl = tk.Label(info_bar, text="Select a script", bg=BG_MID,
+                                  fg=ACCENT, font=("Segoe UI", 10, "bold"))
+        self._file_lbl.pack(side="left", padx=10)
+        self._obj_lbl = tk.Label(info_bar, text="", bg=BG_MID, fg=FG_DIM,
+                                 font=("Segoe UI", 9))
+        self._obj_lbl.pack(side="left", padx=8)
+        tk.Button(info_bar, text="Open in Explorer", bg=BG_MID, fg=FG_DIM,
+                  relief="flat", font=("Segoe UI", 8),
+                  command=self._open_in_explorer).pack(side="right", padx=8)
+
+        sb_h = ttk.Scrollbar(txt_frame, orient="horizontal")
+        sb_h.pack(side="bottom", fill="x")
+        sb_v = ttk.Scrollbar(txt_frame, orient="vertical")
+        sb_v.pack(side="right", fill="y")
+        self._txt = tk.Text(txt_frame, bg=BG_PANEL, fg=FG_TEXT,
+                            font=("Consolas", 9), wrap="none", relief="flat",
+                            xscrollcommand=sb_h.set, yscrollcommand=sb_v.set,
+                            state="disabled")
+        self._txt.pack(fill="both", expand=True)
+        sb_h.config(command=self._txt.xview)
+        sb_v.config(command=self._txt.yview)
+
+        self._txt.tag_configure("block",   foreground=ACCENT,
+                                font=("Consolas", 9, "bold"))
+        self._txt.tag_configure("trigger", foreground=ACCENT2,
+                                font=("Consolas", 9, "bold"))
+        self._txt.tag_configure("action",  foreground=ACCENT3)
+        self._txt.tag_configure("cmd",     foreground=GOLD)
+        self._txt.tag_configure("prop",    foreground=RED)
+        self._txt.tag_configure("number",  foreground="#a8dadc")
+        self._txt.tag_configure("comment", foreground=FG_MUTED,
+                                font=("Consolas", 9, "italic"))
+        self._txt.tag_configure("string",  foreground=ACCENT3)
+
+        # Object map
+        map_frame = tk.Frame(v_pane, bg=BG_DARK)
+        v_pane.add(map_frame, minsize=160)
+
+        map_bar = tk.Frame(map_frame, bg=BG_MID, pady=3)
+        map_bar.pack(fill="x")
+        tk.Label(map_bar, text="Object Map  (CUBE triggers)", bg=BG_MID,
+                 fg=ACCENT2, font=("Segoe UI", 9, "bold")).pack(side="left", padx=10)
+        self._map_info = tk.Label(map_bar, text="", bg=BG_MID, fg=FG_DIM,
+                                  font=("Segoe UI", 8))
+        self._map_info.pack(side="left", padx=8)
+
+        self._map_canvas = tk.Canvas(map_frame, bg="#0a0a12", bd=0,
+                                     highlightthickness=0)
+        self._map_canvas.pack(fill="both", expand=True)
+        self._map_canvas.bind("<Configure>", lambda e: self._draw_map())
+        self._map_canvas.bind("<Motion>", self._on_map_hover)
+
+    # ── Data loading ──────────────────────────────────────────────────────────
+
+    def _load_files(self):
+        self._tv.delete(*self._tv.get_children())
+        ahk = AHKUILON
+        total = 0
+
+        scr_node = self._tv.insert("", "end", text="  Zone Scripts",
+                                   open=True, tags=("cat",))
+        for area in self._AREAS:
+            p = ahk / f"{area}.s"
+            if p.exists():
+                self._tv.insert(scr_node, "end", text=f"  {area}.s",
+                                values=(str(p),), tags=("script",))
+                total += 1
+
+        def_node = self._tv.insert("", "end", text="  Definitions",
+                                   open=False, tags=("cat",))
+        for p in sorted(ahk.glob("*.def")):
+            self._tv.insert(def_node, "end", text=f"  {p.name}",
+                            values=(str(p),), tags=("def",))
+            total += 1
+
+        self._tv.tag_configure("cat",    foreground=ACCENT2,
+                               font=("Segoe UI", 9, "bold"))
+        self._tv.tag_configure("script", foreground=ACCENT3,
+                               font=("Consolas", 9))
+        self._tv.tag_configure("def",    foreground=GOLD,
+                               font=("Consolas", 9))
+        self._count_lbl.config(text=f"{total} files")
+
+    # ── Selection / display ───────────────────────────────────────────────────
+
+    def _on_select(self, _=None):
+        sel = self._tv.selection()
+        if not sel:
+            return
+        vals = self._tv.item(sel[0], "values")
+        if not vals:
+            return
+        path = Path(vals[0])
+        if path == self._cur_path:
+            return
+        self._cur_path = path
+        self._load_script(path)
+
+    def _load_script(self, path: Path):
+        self._file_lbl.config(text=path.name)
+        try:
+            content = path.read_text(encoding="latin-1")
+        except Exception as e:
+            self._status.set(f"Read error: {e}")
+            return
+
+        self._objects = _parse_script_objects(content)
+        lines = [l for l in content.splitlines() if l.strip()]
+        self._obj_lbl.config(
+            text=f"{len(self._objects)} CUBE objects  |  {len(lines)} lines")
+
+        self._txt.configure(state="normal")
+        self._txt.delete("1.0", "end")
+        self._txt.insert("end", content)
+
+        for tag, pat in _SCRIPT_KW.items():
+            for m in pat.finditer(content):
+                line = content[:m.start()].count('\n') + 1
+                col  = m.start() - content[:m.start()].rfind('\n') - 1
+                self._txt.tag_add(tag, f"{line}.{col}",
+                                  f"{line}.{col + len(m.group())}")
+
+        self._txt.configure(state="disabled")
+        self._draw_map()
+        self._status.set(f"{path.name}  —  {len(self._objects)} objects")
+
+    def _open_in_explorer(self):
+        if self._cur_path and self._cur_path.exists():
+            os.startfile(str(self._cur_path.parent))
+
+    # ── Object map ────────────────────────────────────────────────────────────
+
+    def _draw_map(self):
+        c = self._map_canvas
+        c.delete("all")
+        objs = self._objects
+        cw = max(1, c.winfo_width())
+        ch = max(1, c.winfo_height())
+
+        if not objs:
+            c.create_text(cw // 2, ch // 2, text="No CUBE objects in this script",
+                          fill=FG_MUTED, font=("Segoe UI", 10))
+            return
+
+        pad = 24
+        xs = [o["cx"] for o in objs]
+        ys = [o["cy"] for o in objs]
+        mn_x, mx_x = min(xs), max(xs)
+        mn_y, mx_y = min(ys), max(ys)
+        dx = max(mx_x - mn_x, 1)
+        dy = max(mx_y - mn_y, 1)
+        sx = (cw - pad * 2) / dx
+        sy = (ch - pad * 2) / dy
+        scale = min(sx, sy)
+
+        def px(x): return int(pad + (x - mn_x) * scale)
+        def py(y): return int(pad + (y - mn_y) * scale)
+
+        # Grid
+        steps_x = max(1, dx // 8)
+        steps_y = max(1, dy // 6)
+        for gx in range(int(mn_x), int(mx_x) + 1, steps_x):
+            x = px(gx)
+            c.create_line(x, pad, x, ch - pad, fill=BORDER, width=1)
+            c.create_text(x, ch - pad + 8, text=str(gx),
+                          fill=FG_MUTED, font=("Segoe UI", 6), anchor="n")
+        for gy in range(int(mn_y), int(mx_y) + 1, steps_y):
+            y = py(gy)
+            c.create_line(pad, y, cw - pad, y, fill=BORDER, width=1)
+            c.create_text(pad - 2, y, text=str(gy),
+                          fill=FG_MUTED, font=("Segoe UI", 6), anchor="e")
+
+        # Dots
+        self._map_dots = []
+        for o in objs:
+            x, y = px(o["cx"]), py(o["cy"])
+            r = 5
+            c.create_oval(x - r, y - r, x + r, y + r,
+                          fill=ACCENT2, outline=ACCENT, width=1)
+            self._map_dots.append((x, y, o["name"]))
+
+        self._map_info.config(
+            text=f"x {mn_x}…{mx_x}  y {mn_y}…{mx_y}  |  {len(objs)} objects")
+
+    def _on_map_hover(self, event):
+        if not self._map_dots:
+            return
+        nearest = min(self._map_dots,
+                      key=lambda t: (t[0] - event.x) ** 2 + (t[1] - event.y) ** 2)
+        dist_sq = (nearest[0] - event.x) ** 2 + (nearest[1] - event.y) ** 2
+        if dist_sq < 400:
+            self._map_info.config(text=f"  ▸  {nearest[2]}")
+
+    # ── Export ────────────────────────────────────────────────────────────────
+
+    def _export_all(self):
+        import shutil
+        dest = RENDERS_DIR / "AhkuilonScripts"
+        dest.mkdir(parents=True, exist_ok=True)
+        ok = 0
+        for p in list(AHKUILON.glob("*.s")) + list(AHKUILON.glob("*.def")):
+            try:
+                shutil.copy2(str(p), str(dest / p.name))
+                ok += 1
+            except Exception:
+                pass
+        self._status.set(f"Exported {ok} scripts → {dest}")
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+#  SETTINGS DIALOG
+# ═══════════════════════════════════════════════════════════════════════════════
+
+class SettingsDialog(tk.Toplevel):
+    def __init__(self, parent):
+        super().__init__(parent)
+        self.title("RevEngine — Settings")
+        self.configure(bg=BG_DARK)
+        self.resizable(False, False)
+        self.grab_set()
+        self.transient(parent)
+
+        self._game_var    = tk.StringVar(value=str(GAME_DIR))
+        self._extract_var = tk.StringVar(value=str(EXTRACT_DIR))
+        self._renders_var = tk.StringVar(value=str(RENDERS_DIR))
+
+        frm = tk.Frame(self, bg=BG_DARK, padx=24, pady=16)
+        frm.pack(fill="both", expand=True)
+
+        def _browse(var):
+            d = filedialog.askdirectory(initialdir=var.get())
+            if d:
+                var.set(d)
+
+        def _row(label, var, row):
+            tk.Label(frm, text=label, bg=BG_DARK, fg=FG_DIM,
+                     font=("Segoe UI", 9), anchor="w").grid(
+                row=row, column=0, columnspan=2, sticky="w", pady=(10, 2))
+            tk.Entry(frm, textvariable=var, bg=BG_PANEL, fg=FG_TEXT,
+                     insertbackground=FG_TEXT, relief="flat", width=54,
+                     font=("Segoe UI", 9)).grid(
+                row=row+1, column=0, sticky="ew", padx=(0, 6))
+            tk.Button(frm, text="Browse…", bg=BG_MID, fg=FG_TEXT,
+                      relief="flat", font=("Segoe UI", 9),
+                      command=lambda v=var: _browse(v)).grid(
+                row=row+1, column=1, sticky="ew")
+
+        _row("Game Directory", self._game_var, 0)
+        _row("Extract Directory", self._extract_var, 2)
+        _row("Export Directory (renders)", self._renders_var, 4)
+
+        frm.columnconfigure(0, weight=1)
+
+        btn_bar = tk.Frame(self, bg=BG_DARK, padx=24, pady=12)
+        btn_bar.pack(fill="x")
+        tk.Button(btn_bar, text="Cancel", bg=BG_MID, fg=FG_TEXT, relief="flat",
+                  font=("Segoe UI", 9), command=self.destroy).pack(side="right", padx=(8, 0))
+        tk.Button(btn_bar, text="Save", bg=ACCENT, fg="#000000", relief="flat",
+                  font=("Segoe UI", 9, "bold"), command=self._save).pack(side="right")
+
+    def _save(self):
+        global GAME_DIR, EXTRACT_DIR, RENDERS_DIR, IMAGERY, RESOURCES, AHKUILON
+        global IMAGERY_ASSETS, THUMBNAILS, CHAR_DEF, WEAPON_DEF, ARMOR_DEF, SPELL_DEF
+        GAME_DIR    = Path(self._game_var.get())
+        RENDERS_DIR = Path(self._renders_var.get())
+        new_extract = Path(self._extract_var.get())
+        if new_extract != EXTRACT_DIR:
+            EXTRACT_DIR   = new_extract
+            IMAGERY       = EXTRACT_DIR / "imagery"
+            RESOURCES     = EXTRACT_DIR / "resources"
+            AHKUILON      = EXTRACT_DIR / "Ahkuilon"
+            IMAGERY_ASSETS = IMAGERY / "Imagery"
+            THUMBNAILS    = IMAGERY / "Thumbnails"
+            CHAR_DEF      = IMAGERY  / "char.def"
+            WEAPON_DEF    = IMAGERY  / "weapon.def"
+            ARMOR_DEF     = IMAGERY  / "armor.def"
+            SPELL_DEF     = RESOURCES / "spell.def"
+        _save_config()
+        self.destroy()
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
 #  MAIN APPLICATION
 # ═══════════════════════════════════════════════════════════════════════════════
 
 class AssetStudio(tk.Tk):
     def __init__(self):
         super().__init__()
+        _load_config()
         self.title("RevEngine  —  Revenant (1999) Asset Encyclopedia")
         self.geometry("1400x880")
         self.configure(bg=BG_DARK)
         self.resizable(True, True)
         self._apply_style()
         self._build_ui()
+        self._bind_shortcuts()
 
     def _apply_style(self):
         style = ttk.Style(self)
@@ -3857,6 +5055,9 @@ class AssetStudio(tk.Tk):
         style.configure("TPanedwindow",       background=BG_DARK)
 
     def _build_ui(self):
+        # ── Menu bar ─────────────────────────────────────────────────────────
+        self._build_menu()
+
         # ── Header ───────────────────────────────────────────────────────────
         hdr = tk.Frame(self, bg=BG_DARK, pady=8)
         hdr.pack(fill="x")
@@ -3891,6 +5092,8 @@ class AssetStudio(tk.Tk):
         self._mod_tab   = ModelsTab(self._nb, self._status)
         self._snd_tab   = SoundsTab(self._nb, self._status)
         self._cine_tab  = CinematiXTab(self._nb, self._status)
+        self._ui_tab    = UIResourcesTab(self._nb, self._status)
+        self._ahk_tab   = AhkuilonTab(self._nb, self._status)
 
         self._nb.add(self._map_tab,   text="  World Map  ")
         self._nb.add(self._char_tab,  text="  Characters  ")
@@ -3901,6 +5104,8 @@ class AssetStudio(tk.Tk):
         self._nb.add(self._mod_tab,   text="  3D Models  ")
         self._nb.add(self._snd_tab,   text="  Sounds  ")
         self._nb.add(self._cine_tab,  text="  Cinematix  ")
+        self._nb.add(self._ui_tab,    text="  UI Resources  ")
+        self._nb.add(self._ahk_tab,   text="  Ahkuilon  ")
 
         # Update header counts after brief delay
         self.after(2000, self._update_counts)
@@ -3917,6 +5122,160 @@ class AssetStudio(tk.Tk):
                      f"{def_count} scripts  |  {mp3_count + ogg_count} sounds")
         except Exception:
             pass
+
+    # ── Menu ─────────────────────────────────────────────────────────────────
+
+    def _build_menu(self):
+        M = dict(bg=BG_MID, fg=FG_TEXT, activebackground=BG_CARD,
+                 activeforeground=FG_TEXT, relief="flat")
+        menubar = tk.Menu(self, **M, borderwidth=0)
+        self.config(menu=menubar)
+
+        # File
+        file_m = tk.Menu(menubar, tearoff=0, **M)
+        menubar.add_cascade(label="File", menu=file_m)
+        file_m.add_command(label="Open Game Dir",
+                           command=lambda: GAME_DIR.exists() and os.startfile(str(GAME_DIR)))
+        file_m.add_command(label="Open Extract Dir",
+                           command=lambda: EXTRACT_DIR.exists() and os.startfile(str(EXTRACT_DIR)))
+        file_m.add_command(label="Open Export Dir",
+                           command=self._open_export_dir)
+        file_m.add_separator()
+        file_m.add_command(label="Settings…\tCtrl+,", command=lambda: SettingsDialog(self))
+        file_m.add_separator()
+        file_m.add_command(label="Exit\tCtrl+Q", command=self.destroy)
+
+        # View — jump to tab
+        view_m = tk.Menu(menubar, tearoff=0, **M)
+        menubar.add_cascade(label="View", menu=view_m)
+        _tabs = ["World Map", "Characters", "Equipment", "Sprites",
+                 "Spells", "Scripts", "3D Models", "Sounds", "Cinematix",
+                 "UI Resources", "Ahkuilon"]
+        for i, name in enumerate(_tabs):
+            view_m.add_command(label=name, command=lambda i=i: self._nb.select(i))
+
+        # Export
+        exp_m = tk.Menu(menubar, tearoff=0, **M)
+        menubar.add_cascade(label="Export", menu=exp_m)
+        exp_m.add_command(label="Export Current Tab\tCtrl+E",
+                          command=self._export_current_tab)
+        exp_m.add_separator()
+        exp_m.add_command(label="Characters (portraits)…",
+                          command=lambda: self._char_tab._export_all())
+        exp_m.add_command(label="Weapons (icons)…",
+                          command=lambda: self._equip_tab._export_all_weapons())
+        exp_m.add_command(label="Armors (icons)…",
+                          command=lambda: self._equip_tab._export_all_armors())
+        exp_m.add_command(label="Spell Icons…",
+                          command=lambda: self._spell_tab._export_all())
+        exp_m.add_command(label="Scripts (.def files)…",
+                          command=lambda: self._scr_tab._export_all())
+        exp_m.add_command(label="Models (OBJ batch)…",
+                          command=lambda: self._mod_tab._batch_export_obj())
+        exp_m.add_command(label="Sprites (current category)…",
+                          command=lambda: self._spr_tab._export_all())
+        exp_m.add_command(label="UI Resources (all .dat frames)…",
+                          command=lambda: self._ui_tab._export_all())
+        exp_m.add_command(label="Ahkuilon Scripts…",
+                          command=lambda: self._ahk_tab._export_all())
+        exp_m.add_separator()
+        exp_m.add_command(label="Export All Assets…",
+                          command=self._export_all_assets)
+
+        # Help
+        help_m = tk.Menu(menubar, tearoff=0, **M)
+        menubar.add_cascade(label="Help", menu=help_m)
+        help_m.add_command(label="Keyboard Shortcuts", command=self._show_shortcuts)
+        help_m.add_command(label="About\tF1", command=self._show_about)
+
+    def _bind_shortcuts(self):
+        self.bind_all("<Control-q>", lambda e: self.destroy())
+        self.bind_all("<Control-comma>", lambda e: SettingsDialog(self))
+        self.bind_all("<Control-e>", lambda e: self._export_current_tab())
+        self.bind_all("<F1>", lambda e: self._show_about())
+
+    def _open_export_dir(self):
+        RENDERS_DIR.mkdir(parents=True, exist_ok=True)
+        os.startfile(str(RENDERS_DIR))
+
+    # ── Export dispatch ───────────────────────────────────────────────────────
+
+    def _export_current_tab(self):
+        idx = self._nb.index("current")
+        dispatch = {
+            1: self._char_tab._export_all,
+            2: self._equip_tab._export_all_weapons,
+            3: self._spr_tab._export_all,
+            4: self._spell_tab._export_all,
+            5: self._scr_tab._export_all,
+            6: self._mod_tab._batch_export_obj,
+            9: self._ui_tab._export_all,
+            10: self._ahk_tab._export_all,
+        }
+        fn = dispatch.get(idx)
+        if fn:
+            fn()
+        else:
+            self._status.set("No batch export for this tab — use the tab's own controls")
+
+    def _export_all_assets(self):
+        steps = [
+            ("Characters",   self._char_tab._export_all),
+            ("Weapons",      self._equip_tab._export_all_weapons),
+            ("Armors",       self._equip_tab._export_all_armors),
+            ("Scripts",      self._scr_tab._export_all),
+            ("Spell Icons",  self._spell_tab._export_all),
+            ("Models (OBJ)", self._mod_tab._batch_export_obj),
+            ("UI Resources", self._ui_tab._export_all),
+            ("Ahkuilon",     self._ahk_tab._export_all),
+        ]
+        total = len(steps)
+
+        def _run(idx=0):
+            if idx >= total:
+                self._status.set("Export All complete — check export directories")
+                return
+            name, fn = steps[idx]
+            self._status.set(f"Exporting {name}… ({idx + 1}/{total})")
+            try:
+                fn()
+            except Exception as e:
+                log.warning("Export All: %s failed: %s", name, e)
+            self.after(150, _run, idx + 1)
+
+        _run()
+
+    # ── Help dialogs ─────────────────────────────────────────────────────────
+
+    def _show_about(self):
+        messagebox.showinfo(
+            "About RevEngine",
+            "RevEngine Asset Studio\n"
+            "Revenant (1999) Game Encyclopedia\n\n"
+            "Assets © Cinematix Studios / GOG release\n"
+            "Viewer: RevEngine project",
+            parent=self,
+        )
+
+    def _show_shortcuts(self):
+        win = tk.Toplevel(self)
+        win.title("Keyboard Shortcuts")
+        win.configure(bg=BG_DARK)
+        win.resizable(False, False)
+        win.transient(self)
+        rows = [
+            ("Ctrl+E",   "Export Current Tab"),
+            ("Ctrl+,",   "Settings"),
+            ("Ctrl+Q",   "Exit"),
+            ("F1",       "About"),
+        ]
+        for r, (key, desc) in enumerate(rows):
+            tk.Label(win, text=key, bg=BG_DARK, fg=ACCENT,
+                     font=("Consolas", 10, "bold"), width=10, anchor="e").grid(
+                row=r, column=0, padx=(20, 10), pady=6)
+            tk.Label(win, text=desc, bg=BG_DARK, fg=FG_TEXT,
+                     font=("Segoe UI", 10), anchor="w").grid(
+                row=r, column=1, sticky="w", padx=(0, 20))
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
