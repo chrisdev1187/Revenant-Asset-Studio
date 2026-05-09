@@ -322,6 +322,7 @@ def _bake_state_all_frames(rig, state_index: int, nframes: int):
     topo.extend(i for i in range(nb) if i not in set(topo))
 
     # --- Compute world matrices per frame in topological order ---
+    # Returns world matrices (not TRS) so callers can derive local transforms.
     result_frames = []
     world = [None] * nb
     for fr in range(nframes):
@@ -334,12 +335,16 @@ def _bake_state_all_frames(rig, state_index: int, nframes: int):
                 world[i] = _mat_mul(lm, world[p])
             else:
                 world[i] = lm
-        result_frames.append([
-            (_mat_translation(world[i]), _mat_to_quat(world[i]), _mat_scale(world[i]))
-            for i in range(nb)
-        ])
+        result_frames.append([world[i] for i in range(nb)])
 
     return result_frames
+
+
+def _world_to_local(world_mat, parent_world_mat):
+    """Convert world matrix to local (row-major: world = local * parent)."""
+    if parent_world_mat is None:
+        return world_mat
+    return _mat_mul(world_mat, _mat_inv4(parent_world_mat))
 
 
 # ---------------------------------------------------------------------------
@@ -523,11 +528,16 @@ def export_gltf(geom, textures: list, out_path: Path,
                 children_of[p].append(i)
 
         def _node_for_bone(bi):
-            wm   = rig.world_mats[bi]
+            wm = rig.world_mats[bi]
+            p  = rig.bone_parents[bi]
+            # glTF node transforms are LOCAL. Convert world→local so that
+            # any spec-compliant consumer (Blender, Three.js) computes the
+            # correct joint world matrix via the node hierarchy.
+            lm = _world_to_local(wm, rig.world_mats[p] if 0 <= p < nb else None)
             node = {"name": rig.bone_names[bi]}
-            node["translation"] = _mat_translation(wm)
-            node["rotation"]    = _mat_to_quat(wm)
-            node["scale"]       = _mat_scale(wm)
+            node["translation"] = _mat_translation(lm)
+            node["rotation"]    = _mat_to_quat(lm)
+            node["scale"]       = _mat_scale(lm)
             ch = [c + skin_node_offset for c in children_of[bi]]
             if ch:
                 node["children"] = ch
@@ -580,11 +590,14 @@ def export_gltf(geom, textures: list, out_path: Path,
             for bi in range(nb):
                 node_idx = bi + skin_node_offset
                 trans_vals = []; rot_vals = []; scl_vals = []
+                pi = rig.bone_parents[bi]
                 for fr in range(nframes):
-                    t, q, s = all_frames_trs[fr][bi]
-                    trans_vals.extend(t)
-                    rot_vals.extend(q)
-                    scl_vals.extend(s)
+                    wm = all_frames_trs[fr][bi]
+                    pwm = all_frames_trs[fr][pi] if 0 <= pi < nb else None
+                    lm = _world_to_local(wm, pwm)
+                    trans_vals.extend(_mat_translation(lm))
+                    rot_vals.extend(_mat_to_quat(lm))
+                    scl_vals.extend(_mat_scale(lm))
 
                 for path_name, values, acc_type in [
                     ("translation", trans_vals, "VEC3"),

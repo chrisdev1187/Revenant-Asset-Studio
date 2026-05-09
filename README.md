@@ -27,7 +27,8 @@ Built on research from nuxdie, MathJazz, and benjcooley.
 | **Ahkuilon / Zone Scripts** | ✅ Full | 9 zone scripts (.s) + definition files; syntax highlight; live 2D CUBE object map; batch export |
 | **Menu bar** | ✅ Full | File / View / Export / Help; Settings dialog; keyboard shortcuts |
 | **Unified export** | ✅ Full | Export Current Tab (Ctrl+E), per-type menu entries, Export All Assets |
-| **Asset Upscaler** | ✅ Full | Real-ESRGAN ×4 batch upscale for UI panels, icons, model textures, sprites; before/after review window; flag/redo; Cinematix SMK→MP4 pipeline |
+| **Asset Upscaler** | ✅ Full | NVIDIA NIM FLUX.1-kontext-dev img2img batch upscale; prompt + strength controls; before/after review; flag/redo; Cinematix SMK→MP4 pipeline |
+| **Modernize 3D** | ✅ Full | One-click pipeline: decode i3d → GPU upscale → Sobel normal/roughness → Blender CC subdivision + AO bake → PBR GLB with full rig + animations |
 | Deathmatch zones (DM1–DM6) | ⏳ Planned | 6 MP maps with .chr character saves, scripts, automaps |
 | Map chunk tiles | ⏳ Planned | 4,896 .DAT world geometry tiles (format TBD) |
 | Playable character textures | ⏳ Deferred | Known broken; requires separate investigation |
@@ -36,12 +37,42 @@ Built on research from nuxdie, MathJazz, and benjcooley.
 
 ## Changelog
 
+### 2026-05-09 — Bug fixes
+
+- **Models tab — textured mode default:** 3D viewer now opens in Textured mode by default (was Shaded). All embedded DirectDraw textures display immediately on model selection without requiring a mode switch.
+- **ncnn upscaler — model file layout fix:** `realesrgan-ncnn-vulkan` expects model weights at `models/<name>.param` relative to the exe. Zip extraction and/or OneDrive sync were stripping the `models/` subdirectory and truncating filenames. Fixed: correct directory structure documented and restored; `_detect_ncnn()` now falls back to a glob pattern (`*ncnn-vulkan*.exe`) to survive future naming drift.
+- **Zip extraction robustness:** `_install_ncnn_worker` now validates whether the zip has a top-level directory before stripping it, preventing filename corruption on flat-structured archives.
+
+### 2026-05-09 — Modernize 3D pipeline
+
+- **New "Modernize 3D" tab:** One-click pipeline converts any Revenant `.i3d` file into a modern, PBR-textured, rigged, animated `.glb` — no manual Blender work required.
+- **6-step fully automated pipeline:**
+  1. **Decode** — reads `.i3d` geometry + embedded texture via existing decoders
+  2. **Export base glTF** — writes correct local-space bone transforms (world-space bug fixed in `gltf_export.py`)
+  3. **GPU texture upscale** — `realesrgan-ncnn-vulkan` (Vulkan binary, works on Nvidia/AMD/Intel via Vulkan API, ~2–5 s on GPU). Falls back to PIL LANCZOS if binary not installed.
+  4. **Normal map** — Sobel gradient from upscaled diffuse → tangent-space normal PNG (`decoders/pbr_maps.py`)
+  5. **Roughness map** — inverted luminance, clamped to [0.50–1.00] (`decoders/pbr_maps.py`)
+  6. **Blender headless** — merge-by-distance (fixes UV-split blob bug) → Catmull-Clark subdivision (401→5,835 verts for acolyte at levels=2) → shade smooth → AO bake (Cycles 64 spp) → wire normal + roughness into BSDF → export GLB with full rig + all 40+ animation clips
+- **GPU selector:** WMI-detected adapter list (Nvidia/AMD/Intel) + CPU-only fallback. Combobox with refresh button; CPU mode uses 600 s timeout.
+- **Real-time progress bar + timestamped log:** Each pipeline step streams Blender stdout line-by-line into the log. Stop button terminates the Blender subprocess cleanly.
+- **Browse opens in Chars folder:** File dialog starts at `extracted/imagery/Imagery/Chars/` (622 `.i3d` files available).
+- **Key bug fix — bone transforms:** `gltf_export.py` was writing world-space transforms on all hierarchy nodes; glTF requires local-space. Fixed: `local = world_mat × parent_world_inv`. Applied to both bind pose and all animation channels.
+- **Key bug fix — CC subdivision:** UV-seam split vertices (same XYZ, different UV, topologically disconnected) were averaging to centroid → blob. Fixed with `mesh.remove_doubles(threshold=1e-5)` before applying Catmull-Clark.
+- **New files:** `asset_studio_modernize.py`, `decoders/pbr_maps.py`, `tools/modernize_pipeline.py`, `UPSCALING_101.md`
+
+### 2026-05-08 — FLUX NIM upscaler
+- **Replaced Real-ESRGAN with NVIDIA NIM FLUX.1-kontext-dev:** The Asset Upscaler tab now calls the NVIDIA NIM cloud API (`black-forest-labs/flux.1-kontext-dev`) for all static asset enhancement. FLUX.1-kontext-dev preserves structural identity while adding epic lighting, colour depth, and cinematic detail — ideal for retro game assets.
+- **Configurable prompt + negative prompt:** Free-text fields in the left panel default to a retro-fantasy prompt. Both fields accept any text and are used for batch runs and individual redos.
+- **Strength / creativity slider:** 0.45 → 0.85. Maps to FLUX guidance scale (1.5–5.0) and inference steps (20–40). Low strength = faithful; high strength = creative.
+- **`.env` support:** API key is loaded from `.env` at launch via `python-dotenv`. A key status badge (✓/✗) in the left panel reflects availability without requiring a restart.
+- **Cinematix SMK→MP4 pipeline:** Video frames use PIL LANCZOS fast-resize (FLUX skipped — per-frame API calls would be prohibitively slow). Output: `renders/upscaled/cinematix/<stem>_{scale}x.mp4`.
+- **Tiny-sprite bypass:** Assets ≤32 px use `PIL.NEAREST` (FLUX over-smooths at tiny resolutions).
+
 ### 2026-05-07 — Asset Upscaler
-- **Asset Upscaler tab:** New tab batch-upscales all game asset categories using Real-ESRGAN (`RealESRGAN_x4plus_anime_6B`, 6-block RRDB). Categories: UI Panels (`.dat` frames), Equipment Icons, Talisman Icons, Model Textures (`.i3d` embedded), Sprites (`.i2d` clean), and Cinematix FMV. Assets ≤32 px are upscaled with `PIL.NEAREST ×4` (preserves pixel art; ESRGAN hallucinates at tiny resolutions); larger assets use the full neural upscaler. Output written to `renders/upscaled/<category>/`.
-- **Results review window:** Vertical scrollable card list shows every processed asset with before/after thumbnails, filename, resolution delta, and status badge (ok / flagged / failed). Selecting a card opens a side-by-side compare view with fit-to-panel zoom. Individual assets can be re-queued with different model or scale via **Redo**; **Redo Flagged** batch-reruns all flagged items.
-- **Cinematix SMK→MP4 pipeline:** Upscales Silmarillion `.smk` FMV files to MP4: FFmpeg extracts frames at 15 fps → ESRGAN upscales each frame → FFmpeg re-encodes to H.264 CRF 18. Searches `GOG Games/Revenant/Disk2` and `GAME_DIR` automatically. Output: `renders/upscaled/cinematix/<stem>_4x.mp4`.
-- **FFmpeg auto-installer:** Detects FFmpeg in `tools/ffmpeg.exe`, `PATH`, and common install locations. If missing, **Install FFmpeg** downloads the BtbN win64-lgpl build (~25 MB) and extracts `ffmpeg.exe` to `<project>/tools/` with a progress log. Custom path can also be set via **Browse**.
-- **basicsr torchvision compat patch:** `torchvision ≥0.16` removed `functional_tensor`. The upscaler applies a one-time idempotent patch to `basicsr/data/degradations.py` (changes the import to `torchvision.transforms.functional`) before loading the model.
+- **Asset Upscaler tab:** New tab batch-upscales all game asset categories. Categories: UI Panels (`.dat` frames), Equipment Icons, Talisman Icons, Model Textures (`.i3d` embedded), Sprites (`.i2d` clean), and Cinematix FMV. Assets ≤32 px are upscaled with `PIL.NEAREST ×4`. Output written to `renders/upscaled/<category>/`.
+- **Results review window:** Vertical scrollable card list shows every processed asset with before/after thumbnails, filename, resolution delta, and status badge (ok / flagged / failed). Selecting a card opens a side-by-side compare view. Individual assets can be re-queued via **Redo**; **Redo Flagged** batch-reruns all flagged items.
+- **Cinematix SMK→MP4 pipeline:** FFmpeg extracts frames at 15 fps → upscale → FFmpeg re-encodes to H.264 CRF 18. Searches `GOG Games/Revenant/Disk2` and `GAME_DIR` automatically.
+- **FFmpeg auto-installer:** Detects FFmpeg in `tools/ffmpeg.exe`, `PATH`, and common install locations. Downloads the BtbN win64-lgpl build (~25 MB) if missing.
 
 ### 2026-05-07
 - **Menu bar + Settings dialog:** Added File / View / Export / Help menu bar. Settings dialog (Ctrl+,) allows changing Game Dir, Extract Dir, and Renders Dir with JSON persistence (`revengine.json`). Keyboard shortcuts: Ctrl+Q quit, Ctrl+E export current tab, F1 about.
@@ -90,11 +121,24 @@ Built on research from nuxdie, MathJazz, and benjcooley.
 
 ## Setup
 
-Requires **Python 3.10+** and **Pillow**.
+Requires **Python 3.10+**.
 
 ```bash
-pip install pillow
+pip install -r requirements.txt
 ```
+
+This installs: `Pillow`, `numpy`, `openai` (NIM client), `python-dotenv`.
+
+### NVIDIA NIM API key (required for the Upscaler tab)
+
+1. Get a free key at **https://build.nvidia.com** (free tier includes 1,000 credits)
+2. Create `.env` in the project root:
+
+```
+NVIDIA_API_KEY=nvapi-...
+```
+
+The key status badge in the Upscaler left panel turns green when the key is detected.
 
 Clone into any directory — **not** inside the game folder:
 
@@ -210,31 +254,50 @@ The output file is **self-contained** (all geometry, textures, and animation dat
 
 ## Asset Upscaler
 
-The **Upscale** tab provides a fully automated HD upscaling pipeline for every asset category in the game.
+The **Upscale** tab provides a fully automated AI enhancement pipeline for every asset category in the game, powered by **NVIDIA NIM FLUX.1-kontext-dev**.
+
+### How it works
+
+Each asset is:
+1. Decoded to a PIL Image (existing decoders — unchanged)
+2. Pre-scaled to the target resolution (2× or 4× of original, clamped to 2048 px, aligned to 64-px grid)
+3. Encoded as a PNG data URI and submitted to the NIM endpoint
+4. The response image (b64_json) is decoded back to RGBA PNG and saved
+
+FLUX.1-kontext-dev is an image-editing model that preserves structural identity while enriching lighting, colour, and surface detail — producing "alive" results that respect the original retro design.
 
 ### Asset categories
 
-| Category | Source files | Method | Output size |
+| Category | Source files | Method | Output |
 |---|---|---|---|
-| UI Panels | `extracted/resources/*.dat` | Real-ESRGAN ×4 | up to 2560 px |
-| Equipment Icons | `Thumbnails/Equip/*.tn` | PIL NEAREST ×4 | 64×64 px |
-| Talisman Icons | `Thumbnails/Magic/*.tn` | PIL NEAREST ×4 | 64×64 px |
-| Model Textures | `Imagery/Chars/**/*.i3d` | Real-ESRGAN ×4 | up to 512 px |
-| Sprites | `Imagery/**/*.i2d` (LZ-clean) | Real-ESRGAN ×4 | up to 2048 px |
-| Cinematix FMV | `Disk2/*.smk` | FFmpeg + Real-ESRGAN ×4 + FFmpeg | H.264 MP4 |
+| UI Panels | `extracted/resources/*.dat` | FLUX ×2/×4 | PNG per frame |
+| Equipment Icons | `Thumbnails/Equip/*.tn` | FLUX ×2/×4 | PNG 64+ px |
+| Talisman Icons | `Thumbnails/Magic/*.tn` | FLUX ×2/×4 | PNG 64+ px |
+| Model Textures | `Imagery/Chars/**/*.i3d` | FLUX ×2/×4 | PNG per slot |
+| Sprites | `Imagery/**/*.i2d` (LZ-clean) | FLUX ×2/×4 | PNG |
+| Cinematix FMV | `Disk2/*.smk` | FFmpeg + PIL LANCZOS + FFmpeg | H.264 MP4 |
 
-Icons ≤32 px use `PIL.NEAREST` rather than the neural upscaler to preserve pixel-art crispness and avoid hallucinated detail.
+Assets ≤32 px bypass FLUX and receive `PIL.NEAREST` resize (FLUX over-smooths tiny pixel art). Video frames use PIL LANCZOS — running a cloud API call per frame is impractical.
+
+### Controls
+
+| Control | Values | Effect |
+|---|---|---|
+| **Scale** | 2×, 4× | Target resolution multiplier |
+| **Strength** | 0.45 – 0.85 | Maps to FLUX guidance (1.5–5.0) and steps (20–40). Low = faithful; high = creative |
+| **FLUX Prompt** | free text | Describes the desired enhancement style |
+| **Negative prompt** | free text | Suppresses unwanted artefacts |
 
 ### Output layout
 
 ```
 renders/upscaled/
 ├── ui_panels/          <stem>_f<n>.png  per dat frame
-├── equip_icons/        <stem>.png       64×64
-├── talisman_icons/     <stem>.png       64×64
+├── equip_icons/        <stem>.png
+├── talisman_icons/     <stem>.png
 ├── model_textures/     <stem>_t<n>.png  per texture slot
 ├── sprites/            <stem>.png
-└── cinematix/          <stem>_4x.mp4
+└── cinematix/          <stem>_{scale}x.mp4
 ```
 
 ### Before/after review
@@ -243,17 +306,18 @@ Every processed asset appears in the scrollable results list with status badge:
 
 | Badge | Meaning |
 |---|---|
-| **ok** | Passed visual inspection |
-| **flagged** | Manually marked for redo |
-| **failed** | Decode or ESRGAN error |
+| **ok** | Accepted |
+| **flagged** | Marked for redo |
+| **failed** | Decode or API error |
 
-Click any card to open the side-by-side compare view. Use **Flag** to mark an asset for redo, then **Redo** to reprocess a single item or **Redo Flagged** to batch-redo all flagged items with different model/scale settings.
+Click any card to open the side-by-side compare view. Use **Flag** → **Redo** to reprocess a single item, or **Redo Flagged** to batch-redo all flagged items with a different strength or prompt.
 
 ### Dependencies
 
-- **Real-ESRGAN** Python source — `C:\Users\chris\OneDrive\Desktop\upscaler\Real-ESRGAN`
-- **PyTorch** (CPU inference; `half=False` for Intel integrated graphics)
-- **FFmpeg** — auto-installed to `tools/ffmpeg.exe` via in-app downloader (BtbN win64-lgpl build)
+- **openai** Python package (`pip install openai`) — NIM API client
+- **python-dotenv** — auto-loads `NVIDIA_API_KEY` from `.env`
+- **NVIDIA NIM API key** — free tier at https://build.nvidia.com
+- **FFmpeg** — auto-installed to `tools/ffmpeg.exe` via in-app downloader (Cinematix only)
 
 ---
 
@@ -400,15 +464,21 @@ A stored value of 0 is a null pointer (do not dereference).
 
 ```
 Revengine/
-├── asset_studio.py          Main GUI application (Tkinter)
-├── archive_extractor.py     Batch ZIP extractor for .rvr/.rvi/.rvm
-├── map_parser.py            Zone/tile map parser
-├── export_zone_maps.py      CLI: batch-export automap zones to PNG
-├── diagnose_automaps.py     Automap tile diagnostic tool
-├── archaeology.py           Low-level format archaeology helpers
+├── asset_studio.py              Main GUI application (Tkinter)
+├── asset_studio_modernize.py    "Modernize 3D" tab — full pipeline UI + worker thread
+├── archive_extractor.py         Batch ZIP extractor for .rvr/.rvi/.rvm
+├── map_parser.py                Zone/tile map parser
+├── export_zone_maps.py          CLI: batch-export automap zones to PNG
+├── diagnose_automaps.py         Automap tile diagnostic tool
+├── archaeology.py               Low-level format archaeology helpers
+│
+├── UPSCALING_101.md             Research doc: all findings, tool comparisons, pipeline design, gaps
 │
 ├── tools/
-│   └── ffmpeg.exe           Auto-downloaded by the Upscale tab (gitignored)
+│   ├── modernize_pipeline.py    Blender headless script — CC subdivide + AO bake + PBR wire + GLB export
+│   ├── ffmpeg.exe               Auto-downloaded by the Upscale tab (gitignored)
+│   └── realesrgan-ncnn/
+│       └── realesrgan-ncnn-vulkan.exe   GPU upscaler (Vulkan, Nvidia/AMD/Intel; install via Upscale tab)
 │
 └── decoders/
     ├── i3d.py               .i3d skeletal model decoder (geometry + animation)
@@ -417,8 +487,12 @@ Revengine/
     │                          load_state()            — animate in-place
     │                          list_anim_states()      — state names only
     │                          export_obj()            — Wavefront OBJ writer
-    ├── gltf_export.py       glTF 2.0 exporter (skinned mesh + animation clips)
+    ├── gltf_export.py       glTF 2.0 exporter (skinned mesh + all animation clips)
     │                          export_gltf()
+    │                          Bone transforms: local-space (world × parent_world_inv)
+    ├── pbr_maps.py          PBR map generator — pure Python, no GPU
+    │                          generate_normal_map(diffuse, strength=2.0)  — Sobel gradient → tangent-space normal
+    │                          generate_roughness_map(diffuse)             — inverted luminance roughness
     ├── i2d.py               .i2d sprite decoder
     └── cgsr.py              CGSR header parser (shared)
 ```
@@ -451,25 +525,111 @@ python -c "import logging; logging.basicConfig(level=logging.DEBUG)" asset_studi
 
 Logger hierarchy:
 - `RevEngine.Studio` — asset_studio.py
+- `RevEngine.Modernize` — asset_studio_modernize.py
 - `RevEngine.i3d` — decoders/i3d.py
 - `RevEngine.glTF` — decoders/gltf_export.py
 - `RevEngine.Extractor` — archive_extractor.py
 
 ---
 
+## Modernize 3D
+
+The **Modernize 3D** tab is a fully automated old-to-modern pipeline that takes any Revenant `.i3d` file and outputs a production-ready `.glb` with smooth geometry, PBR textures, and all animations intact.
+
+### What it produces
+
+| Asset | 1999 Original | Modernized Output |
+|---|---|---|
+| Geometry | ~400–600 verts, hard edges | ~5,000–8,000 verts, smooth CC mesh |
+| Texture | 128×128 RGB565 | 512×512+ PNG (4× GPU upscaled) |
+| Surface maps | None (flat diffuse only) | Normal map + Roughness map + AO map |
+| Rig | Rigid single-bone-per-vertex | Same skeleton, preserved |
+| Animations | 40+ SAniKey32 states | All states exported to GLB |
+
+### Pipeline steps
+
+```
+.i3d file
+  │
+  ▼  ~0.1s
+decode_i3d_geometry() + decode_i3d_textures()
+  → geometry (verts, faces, bones, animations)
+  → PIL Image 128×128 diffuse
+  │
+  ▼  ~0.5s
+export_gltf()  — local-space bone transforms (glTF-correct)
+  → base .gltf
+  │
+  ▼  ~2–5s  (GPU)
+realesrgan-ncnn-vulkan  -n realesrgan-x4plus-anime  -s 4
+  → upscaled_diffuse.png  512×512
+  │
+  ▼  ~0.2s
+generate_normal_map(strength=2.0)   [decoders/pbr_maps.py]
+generate_roughness_map()            [decoders/pbr_maps.py]
+  → normal.png + roughness.png
+  │
+  ▼  ~30s
+Blender 5.x headless               [tools/modernize_pipeline.py]
+  ├── merge-by-distance (weld UV-split verts)
+  ├── Catmull-Clark subdivision levels=2
+  ├── Shade smooth
+  ├── Swap in upscaled diffuse
+  ├── Wire normal + roughness → BSDF material nodes
+  ├── AO bake (Cycles, 512×512, 64 spp)
+  └── Export GLB (mesh + skin + all animations + all maps)
+  │
+  ▼
+{model}_modern.glb   ✓ rigged  ✓ animated  ✓ PBR textured
+
+Sidecar files:
+  {model}_diffuse.png     upscaled 512×512
+  {model}_normal.png      Sobel-generated
+  {model}_roughness.png   luminance-inverted
+  {model}_ao.png          Cycles-baked
+```
+
+**Total time: ~35–45 seconds per model on any Vulkan-capable GPU.**
+
+### GPU support
+
+The upscaler binary (`realesrgan-ncnn-vulkan`) runs on Nvidia, AMD, and Intel GPUs via the Vulkan API — no CUDA required. A CPU-only fallback is also available (significantly slower — ~5–10 minutes per texture).
+
+Install the binary via the Upscale tab → "Install to project" button, or place `realesrgan-ncnn-vulkan.exe` in `tools/realesrgan-ncnn/`.
+
+### Options
+
+| Option | Default | Notes |
+|---|---|---|
+| Subdivide levels | 2 | 1 = subtle, 3–4 = very heavy (slow Blender bake) |
+| Upscale | 4× | Uses anime model — best for hand-painted game textures |
+| Normal map strength | 2.0 | 1.0–4.0; higher = more pronounced surface detail |
+| AO resolution | 512 | 256 for speed, 1024 for quality |
+| GPU | Auto | WMI-detected; includes per-adapter index + CPU fallback |
+
+See `UPSCALING_101.md` for full research findings, tool comparisons, and known gaps.
+
+---
+
 ## HD Remake Pipeline
 
-The glTF export is designed as the first stage of a full HD remake pipeline:
+The glTF export (Models tab) or the full modernized GLB (Modernize 3D tab) feed directly into a standard HD remake workflow:
 
 ```
-Revengine  →  glTF 2.0  →  Blender  →  HD mesh/rig  →  Godot 4 / Unreal
+Revengine  →  Modernize 3D  →  .glb  →  Blender / Godot 4 / Unreal
 ```
 
-1. Export any character from the Models tab → `.gltf`
-2. Import into Blender 3.x+ (File → Import → glTF 2.0)
-3. The full skeleton and all animation clips are available in the NLA Editor
-4. Retopologise, re-skin, and enhance textures against the original rig
-5. Export from Blender to the target engine
+**Quick path (Modernize 3D tab):**
+1. Select any `.i3d` from `extracted/imagery/Imagery/Chars/`
+2. Click **Run** — ~40 seconds
+3. Open output `.glb` in Blender, Godot 4, or any glTF-capable engine
+4. Full skeleton + all animations available in the NLA Editor / AnimationPlayer
+
+**Manual path (glTF export from Models tab):**
+1. Export any character → `.gltf`
+2. Import into Blender (File → Import → glTF 2.0)
+3. Retopologise, re-skin, enhance textures against the original rig
+4. Export to target engine
 
 The bone hierarchy, parent indices, inverse bind matrices, and per-frame TRS keyframes are all faithfully reproduced from the original SAniKey32 streams.
 

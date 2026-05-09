@@ -27,6 +27,13 @@ import os
 from pathlib import Path
 from typing import Optional, List, Dict, Tuple
 
+# Load .env from the project root (NVIDIA_API_KEY etc.) before anything else reads env vars.
+try:
+    from dotenv import load_dotenv
+    load_dotenv(Path(__file__).parent / ".env", override=False)
+except ImportError:
+    pass  # python-dotenv optional; set NVIDIA_API_KEY in your shell if not installed
+
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s  %(levelname)-8s  %(name)s  %(message)s",
@@ -2570,7 +2577,7 @@ class ModelViewer3D(tk.Frame):
         self._el     = 0.1
         self._zoom   = 1.0
         self._drag   = None
-        self._mode_var = tk.StringVar(value="shaded")
+        self._mode_var = tk.StringVar(value="textured")
         self._build()
 
     def _build(self):
@@ -5018,17 +5025,35 @@ class SettingsDialog(tk.Toplevel):
 class UpscaleTab(tk.Frame):
     """Batch upscaler with per-asset results review, before/after compare, and redo."""
 
-    ESRGAN_DIR = Path("C:/Users/chris/OneDrive/Desktop/upscaler/Real-ESRGAN")
-    _SMALL_PX  = 32  # px threshold: use NEAREST below this, ESRGAN above
-    _THUMB_PX  = 56  # thumbnail size in the results list
-    MODEL_URLS = {
-        "RealESRGAN_x4plus_anime_6B": (
-            "https://github.com/xinntao/Real-ESRGAN/releases/download/"
-            "v0.2.2.4/RealESRGAN_x4plus_anime_6B.pth"),
-        "RealESRGAN_x4plus": (
-            "https://github.com/xinntao/Real-ESRGAN/releases/download/"
-            "v0.1.0/RealESRGAN_x4plus.pth"),
-    }
+    # ── NVIDIA NIM FLUX text-to-image pipeline ────────────────────────────────
+    # Endpoint: POST https://ai.api.nvidia.com/v1/genai/{model}
+    # Response: {"artifacts": [{"base64": "..."}]}
+    # Auth: NVIDIA_API_KEY in .env  (free key at build.nvidia.com)
+    # NIM only accepts: prompt, width, height, seed — nothing else.
+    # Valid dimensions (each axis must be from this list):
+    #   768 832 896 960 1024 1088 1152 1216 1280 1344
+    NIM_BASE_URL     = "https://ai.api.nvidia.com/v1/genai"
+    NIM_MODEL        = "black-forest-labs/flux.1-schnell"   # fast batch
+    NIM_MODEL_T2I    = "black-forest-labs/flux.1-dev"       # quality textures
+    NIM_TEX_SIZE     = 1024
+    NIM_VALID_SIZES  = (768, 832, 896, 960, 1024, 1088, 1152, 1216, 1280, 1344)
+    DEFAULT_PROMPT   = (
+        "retro fantasy RPG game asset, epic heroic lighting, "
+        "rich color depth, sharp pixel-art detail, cinematic glow, "
+        "dark fantasy atmosphere"
+    )
+    # Texture-specific prompt — prepended when generating model textures
+    DEFAULT_TEX_PROMPT = (
+        "4K PBR game texture, dark fantasy RPG character, physically based "
+        "rendering, high detail surface material, ultra sharp, seamless, "
+        "subsurface scattering, specular highlights, normal map detail"
+    )
+    DEFAULT_NEG      = (
+        "blurry, low quality, dithering artifacts, washed out, flat, "
+        "oversaturated, deformed, extra limbs, watermark"
+    )
+    _SMALL_PX        = 32   # sprites ≤ this skip FLUX → NEAREST resize
+    _THUMB_PX        = 56   # thumbnail size in the results list
     _STATUS_COLORS = {"ok": ACCENT3, "flagged": "#f59e0b", "failed": RED}
 
     def __init__(self, parent, status: StatusBar):
@@ -5072,12 +5097,8 @@ class UpscaleTab(tk.Frame):
         ttk.Combobox(bar, textvariable=self._scale_var, values=["2", "4"],
                      state="readonly", width=3).pack(side="right")
 
-        tk.Label(bar, text="Model:", bg=BG_DARK, fg=FG_DIM,
-                 font=("Segoe UI", 9)).pack(side="right", padx=(10, 2))
-        self._model_var = tk.StringVar(value="RealESRGAN_x4plus_anime_6B")
-        ttk.Combobox(bar, textvariable=self._model_var,
-                     values=["RealESRGAN_x4plus_anime_6B", "RealESRGAN_x4plus"],
-                     state="readonly", width=28).pack(side="right")
+        # NIM strength/label hidden — pipeline uses Real-ESRGAN ncnn
+        self._strength_var = tk.StringVar(value="0.65")
 
         # Horizontal split: left (categories) | right (results + compare)
         pane = tk.PanedWindow(self, orient="horizontal", bg=BG_DARK, sashwidth=4)
@@ -5105,6 +5126,10 @@ class UpscaleTab(tk.Frame):
                            font=("Segoe UI", 9), anchor="w").pack(side="left", fill="x", expand=True)
             cnt = tk.Label(row, text="…", bg=BG_PANEL, fg=FG_DIM, font=("Segoe UI", 8))
             cnt.pack(side="right", padx=4)
+            tk.Button(row, text="▶1", bg=BG_CARD, fg=ACCENT2, relief="flat",
+                      font=("Segoe UI", 7, "bold"), padx=3, pady=0,
+                      cursor="hand2",
+                      command=lambda k=key: self._test_single(k)).pack(side="right", padx=(0, 2))
             self._cats[key] = (var, cnt)
 
         # FFmpeg section (required for Cinematix)
@@ -5135,6 +5160,69 @@ class UpscaleTab(tk.Frame):
         self._ffmpeg_path_var.trace_add("write",
                                          lambda *_: self._on_ffmpeg_path_changed())
         self._update_ffmpeg_status()
+
+        tk.Frame(left, bg=BORDER, height=1).pack(fill="x", padx=8, pady=(2, 4))
+
+        # ── Real-ESRGAN ncnn (video upscaler) ────────────────────────────────
+        ncnn_hdr = tk.Frame(left, bg=BG_PANEL)
+        ncnn_hdr.pack(fill="x", padx=8, pady=(2, 0))
+        tk.Label(ncnn_hdr, text="Real-ESRGAN (Video)", bg=BG_PANEL, fg=FG_DIM,
+                 font=("Segoe UI", 8, "bold")).pack(side="left")
+        self._ncnn_status_lbl = tk.Label(ncnn_hdr, bg=BG_PANEL,
+                                          font=("Segoe UI", 8, "bold"))
+        self._ncnn_status_lbl.pack(side="left", padx=4)
+
+        ncnn_btns = tk.Frame(left, bg=BG_PANEL)
+        ncnn_btns.pack(fill="x", padx=8, pady=1)
+        self._ncnn_install_btn = tk.Button(
+            ncnn_btns, text="Install to project",
+            bg=ACCENT2, fg="#000", relief="flat",
+            font=("Segoe UI", 8, "bold"), padx=6,
+            command=self._install_ncnn)
+        self._ncnn_install_btn.pack(side="left")
+
+        ncnn_model_row = tk.Frame(left, bg=BG_PANEL)
+        ncnn_model_row.pack(fill="x", padx=8, pady=(2, 1))
+        tk.Label(ncnn_model_row, text="Model:", bg=BG_PANEL, fg=FG_DIM,
+                 font=("Segoe UI", 8)).pack(side="left")
+        self._ncnn_model_var = tk.StringVar(value="realesrgan-x4plus-anime")
+        ttk.Combobox(ncnn_model_row, textvariable=self._ncnn_model_var,
+                     values=["realesrgan-x4plus-anime", "realesrgan-x4plus",
+                             "realesrnet-x4plus"],
+                     state="readonly", width=22).pack(side="left", padx=(4, 0))
+        self._update_ncnn_status()
+
+        # Frame step: how often to apply FLUX/ncnn (every N frames; gaps use LANCZOS)
+        step_row = tk.Frame(left, bg=BG_PANEL)
+        step_row.pack(fill="x", padx=8, pady=(2, 1))
+        tk.Label(step_row, text="FLUX every N frames:", bg=BG_PANEL, fg=FG_DIM,
+                 font=("Segoe UI", 8)).pack(side="left")
+        self._cine_step_var = tk.StringVar(value="4")
+        ttk.Combobox(step_row, textvariable=self._cine_step_var,
+                     values=["1", "2", "4", "8", "16"],
+                     state="readonly", width=4).pack(side="left", padx=(4, 0))
+        tk.Label(step_row, text="(1=all, 16=fast)", bg=BG_PANEL, fg=FG_MUTED,
+                 font=("Segoe UI", 7)).pack(side="left", padx=4)
+
+        tk.Frame(left, bg=BORDER, height=1).pack(fill="x", padx=8, pady=(4, 4))
+
+        # ── NIM text-to-image (future) ────────────────────────────────────────
+        tk.Label(left,
+                 text="NIM text-to-image: coming soon",
+                 bg=BG_PANEL, fg=FG_DIM,
+                 font=("Segoe UI", 8, "italic")).pack(anchor="w", padx=10, pady=(2, 1))
+        tk.Label(left,
+                 text="Prompt-driven regeneration will replace ESRGAN\n"
+                      "once NVIDIA exposes img2img endpoints.",
+                 bg=BG_PANEL, fg=FG_MUTED,
+                 font=("Segoe UI", 7), justify="left").pack(anchor="w", padx=10, pady=(0, 4))
+
+        # Hidden Text widgets — kept so _get_prompt()/_get_neg() work when NIM re-enables
+        self._prompt_txt = tk.Text(left, height=3, font=("Segoe UI", 8))
+        self._prompt_txt.insert("1.0", self.DEFAULT_PROMPT)
+        self._neg_txt = tk.Text(left, height=2, font=("Segoe UI", 8))
+        self._neg_txt.insert("1.0", self.DEFAULT_NEG)
+        self._key_lbl = tk.Label(left, text="", bg=BG_PANEL)
 
         tk.Frame(left, bg=BORDER, height=1).pack(fill="x", padx=8, pady=(2, 8))
         tk.Label(left, text="Output", bg=BG_PANEL, fg=FG_DIM,
@@ -5261,25 +5349,18 @@ class UpscaleTab(tk.Frame):
         params_bar = tk.Frame(cmp_outer, bg=BG_MID, pady=4)
         params_bar.pack(fill="x", side="bottom")
 
-        tk.Label(params_bar, text="Model:", bg=BG_MID, fg=FG_DIM,
+        tk.Label(params_bar, text="Strength:", bg=BG_MID, fg=FG_DIM,
                  font=("Segoe UI", 8)).pack(side="left", padx=(8, 2))
-        self._redo_model_var = tk.StringVar(value="RealESRGAN_x4plus_anime_6B")
-        ttk.Combobox(params_bar, textvariable=self._redo_model_var,
-                     values=["RealESRGAN_x4plus_anime_6B", "RealESRGAN_x4plus"],
-                     state="readonly", width=26).pack(side="left")
+        self._redo_strength_var = tk.StringVar(value="0.65")
+        ttk.Combobox(params_bar, textvariable=self._redo_strength_var,
+                     values=["0.45", "0.55", "0.65", "0.75", "0.85"],
+                     state="readonly", width=6).pack(side="left")
 
         tk.Label(params_bar, text="Scale:", bg=BG_MID, fg=FG_DIM,
                  font=("Segoe UI", 8)).pack(side="left", padx=(8, 2))
         self._redo_scale_var = tk.StringVar(value="4")
         ttk.Combobox(params_bar, textvariable=self._redo_scale_var,
                      values=["2", "4"], state="readonly", width=3).pack(side="left")
-
-        tk.Label(params_bar, text="Tile:", bg=BG_MID, fg=FG_DIM,
-                 font=("Segoe UI", 8)).pack(side="left", padx=(8, 2))
-        self._redo_tile_var = tk.StringVar(value="256")
-        ttk.Combobox(params_bar, textvariable=self._redo_tile_var,
-                     values=["0", "128", "256", "512"], state="readonly",
-                     width=5).pack(side="left")
 
         tk.Button(params_bar, text="Open File", bg=BG_CARD, fg=FG_TEXT,
                   relief="flat", font=("Segoe UI", 8), padx=6,
@@ -5413,9 +5494,8 @@ class UpscaleTab(tk.Frame):
 
         self._cmp_name_lbl.config(text=f"{r['cat']} / {r['name']}")
         p = r.get("params", {})
-        self._redo_model_var.set(p.get("model", "RealESRGAN_x4plus_anime_6B"))
+        self._redo_strength_var.set(str(p.get("strength", "0.65")))
         self._redo_scale_var.set(str(p.get("scale", 4)))
-        self._redo_tile_var.set(str(p.get("tile", 256)))
         self._flag_btn.config(text="Unflag" if r["status"] == "flagged" else "Flag")
 
         # Load full-size images for compare (re-decode source, load output from disk)
@@ -5504,6 +5584,146 @@ class UpscaleTab(tk.Frame):
         for res in all_results:
             self._add_result(res)
 
+    # ── Single-file test ─────────────────────────────────────────────────────
+
+    def _find_first_file(self, cat: str):
+        """Return (cat, decode_fn, out_path) for first decodable asset, or None."""
+        out_root = RENDERS_DIR / "upscaled"
+
+        if cat == "ui_panels" and RESOURCES.exists():
+            for dat in sorted(RESOURCES.glob("*.dat")):
+                try:
+                    raw = dat.read_bytes()
+                    if len(raw) >= 20 and raw[:4] == b"CGSR":
+                        return (cat,
+                                lambda p=dat: _decode_dat_frame(p, 0),
+                                out_root / cat / f"{dat.stem}_f0.png")
+                except Exception:
+                    pass
+
+        elif cat == "equip_icons":
+            eq_dir = THUMBNAILS / "Equip"
+            if eq_dir.exists():
+                for tn in sorted(eq_dir.glob("*.tn")):
+                    return (cat,
+                            lambda p=tn: self._tn_to_image(p),
+                            out_root / cat / f"{tn.stem}.png")
+
+        elif cat == "talisman_icons":
+            mag_dir = THUMBNAILS / "Magic"
+            if mag_dir.exists():
+                for tn in sorted(mag_dir.glob("*.tn")):
+                    return (cat,
+                            lambda p=tn: self._tn_to_image(p),
+                            out_root / cat / f"{tn.stem}.png")
+
+        elif cat == "model_textures" and IMAGERY_ASSETS.exists():
+            from decoders.i3d import decode_i3d_textures
+            for i3d in sorted(IMAGERY_ASSETS.rglob("*.i3d")):
+                try:
+                    textures = decode_i3d_textures(i3d)
+                    for ti, tex in enumerate(textures):
+                        if tex is not None:
+                            return (cat,
+                                    lambda p=i3d, n=ti: self._decode_i3d_texture_n(p, n),
+                                    out_root / cat / f"{i3d.stem}_t{ti}.png")
+                except Exception:
+                    pass
+
+        elif cat == "sprites" and IMAGERY_ASSETS.exists():
+            for i2d in sorted(IMAGERY_ASSETS.rglob("*.i2d")):
+                return (cat,
+                        lambda p=i2d: self._decode_sprite_safe(p),
+                        out_root / cat / f"{i2d.stem}.png")
+
+        elif cat == "cinematix":
+            smks = self._find_smk_files()
+            if smks:
+                return (cat, None, smks[0])   # SMK handled separately in _test_single
+
+        return None
+
+    def _test_single(self, cat: str):
+        """Upscale the first available file in *cat* and show it in the results list."""
+        if self._running:
+            self._status.set("Wait for current batch to finish")
+            return
+
+        job = self._find_first_file(cat)
+        if job is None:
+            self._status.set(f"No {cat} files found — check game directory")
+            return
+
+        cat, decode_fn, path = job
+        scale    = int(self._scale_var.get())
+        strength = float(self._strength_var.get())
+        prompt   = self._get_prompt()
+        neg      = self._get_neg()
+
+        self._stop    = False
+        self._running = True
+        self._start_btn.config(state="disabled")
+        self._stop_btn.config(state="normal")
+        self._log.config(state="normal")
+        self._log.delete("1.0", "end")
+        self._log.config(state="disabled")
+        self._prog["value"] = 0
+        self._prog_lbl.config(text=f"Testing {cat}…")
+
+        def _worker():
+            try:
+                self.after(0, self._log_line,
+                           f"[TEST {cat}]  {Path(path).name if cat == 'cinematix' else Path(path).name}")
+
+                if cat == "cinematix":
+                    ff = self._ffmpeg_path_var.get().strip()
+                    if not ff:
+                        self.after(0, self._log_line, "  Cinematix test skipped — FFmpeg not set")
+                        return
+                    out_root = RENDERS_DIR / "upscaled"
+                    result = self._process_smk(path, scale, strength, prompt, neg, out_root)
+                    if result:
+                        self.after(0, self._add_result, result)
+                    self.after(0, self._log_line, "  Cinematix test done")
+                    return
+
+                img = decode_fn()
+                if img is None:
+                    self.after(0, self._log_line, "  decode returned None — asset may be empty")
+                    return
+
+                self.after(0, self._log_line,
+                           f"  source {img.width}×{img.height}  mode={img.mode}")
+
+                out_path = Path(path)
+                out_path.parent.mkdir(parents=True, exist_ok=True)
+
+                up = self._upscale_with_ncnn(img, scale)
+                up.save(str(out_path), format="PNG")
+
+                self.after(0, self._log_line,
+                           f"  → {up.width}×{up.height}  saved: {out_path.name}")
+                self.after(0, self._add_result, {
+                    "name":      out_path.stem,
+                    "cat":       cat,
+                    "decode_fn": decode_fn,
+                    "out_path":  out_path,
+                    "src_size":  (img.width, img.height),
+                    "out_size":  (up.width,  up.height),
+                    "before_pil": self._make_thumb(img),
+                    "after_pil":  self._make_thumb(up),
+                    "status":    "ok",
+                    "params":    {"strength": strength, "scale": scale, "prompt": prompt},
+                })
+            except Exception as exc:
+                import traceback
+                self.after(0, self._log_line, f"  FAILED: {exc}")
+                self.after(0, self._log_line, traceback.format_exc()[-600:])
+            finally:
+                self.after(0, self._on_done)
+
+        threading.Thread(target=_worker, daemon=True).start()
+
     # ── Batch pipeline ────────────────────────────────────────────────────────
 
     def _start_upscale(self):
@@ -5521,18 +5741,21 @@ class UpscaleTab(tk.Frame):
         self._log.delete("1.0", "end")
         self._log.config(state="disabled")
         self._prog["value"] = 0
-        scale      = int(self._scale_var.get())
-        model_name = self._model_var.get()
+        scale    = int(self._scale_var.get())
+        strength = float(self._strength_var.get())
+        prompt   = self._get_prompt()
+        neg      = self._get_neg()
         threading.Thread(target=self._pipeline_worker,
-                         args=(selected, scale, model_name), daemon=True).start()
+                         args=(selected, scale, strength, prompt, neg), daemon=True).start()
 
     def _stop_upscale(self):
         self._stop = True
         self._status.set("Stopping after current asset…")
 
-    def _pipeline_worker(self, selected: List[str], scale: int, model_name: str):
+    def _pipeline_worker(self, selected: List[str], scale: int,
+                          strength: float, prompt: str, neg: str):
         try:
-            self._run_pipeline(selected, scale, model_name)
+            self._run_pipeline(selected, scale, strength, prompt, neg)
         except Exception as exc:
             self.after(0, self._log_line, f"FATAL: {exc}")
         finally:
@@ -5551,48 +5774,136 @@ class UpscaleTab(tk.Frame):
 
     # ── Core worker ──────────────────────────────────────────────────────────
 
-    def _build_upscaler(self, model_name: str, scale: int, tile: int = 256):
-        """Initialise and return a RealESRGANer. Raises on failure."""
-        import sys, site
-        deg_path = Path(site.getusersitepackages()) / "basicsr" / "data" / "degradations.py"
-        if deg_path.exists():
-            txt = deg_path.read_text(encoding="utf-8")
-            if "functional_tensor" in txt:
-                deg_path.write_text(
-                    txt.replace("from torchvision.transforms.functional_tensor import rgb_to_grayscale",
-                                "from torchvision.transforms.functional import rgb_to_grayscale"),
-                    encoding="utf-8")
+    def _snap_nim_size(self, px: int) -> int:
+        """Snap px to the nearest allowed NIM dimension."""
+        return min(self.NIM_VALID_SIZES, key=lambda s: abs(s - px))
 
-        esrgan_str = str(self.ESRGAN_DIR)
-        if esrgan_str not in sys.path:
-            sys.path.insert(0, esrgan_str)
+    def _nim_generate(self, model: str, prompt: str, width: int, height: int,
+                      seed: int = -1):
+        """POST to NVIDIA NIM genai endpoint; return PIL RGBA image.
 
-        weight_path = self.ESRGAN_DIR / "weights" / f"{model_name}.pth"
-        if not weight_path.exists():
-            url = self.MODEL_URLS.get(model_name)
-            if not url:
-                raise FileNotFoundError(f"No URL for {model_name} and weights missing")
-            self.after(0, self._log_line, f"Downloading {model_name}.pth …")
-            from basicsr.utils.download_util import load_file_from_url
-            load_file_from_url(url, model_dir=str(self.ESRGAN_DIR / "weights"), progress=True)
+        NIM FLUX only accepts: prompt, width, height, seed.
+        Width/height must each be in NIM_VALID_SIZES.
+        Raises RuntimeError with the full API error body on failure.
+        """
+        import base64, io, requests as req
+        from PIL import Image as PILImage
 
-        from basicsr.archs.rrdbnet_arch import RRDBNet
-        from realesrgan import RealESRGANer
-        num_block = 6 if "anime_6B" in model_name else 23
-        model = RRDBNet(num_in_ch=3, num_out_ch=3, num_feat=64,
-                        num_block=num_block, num_grow_ch=32, scale=scale)
-        return RealESRGANer(scale=scale, model_path=str(weight_path), model=model,
-                             tile=tile, tile_pad=10, pre_pad=0, half=False)
+        api_key = os.environ.get("NVIDIA_API_KEY", "").strip()
+        if not api_key:
+            raise RuntimeError(
+                "NVIDIA_API_KEY not set — add it to .env"
+            )
+        url     = f"{self.NIM_BASE_URL}/{model}"
+        headers = {
+            "Authorization": f"Bearer {api_key}",
+            "Content-Type":  "application/json",
+            "Accept":        "application/json",
+        }
+        payload = {
+            "prompt": prompt,
+            "width":  self._snap_nim_size(width),
+            "height": self._snap_nim_size(height),
+        }
+        if seed >= 0:
+            payload["seed"] = seed
+        r = req.post(url, headers=headers, json=payload, timeout=180)
+        if not r.ok:
+            raise RuntimeError(
+                f"NIM {r.status_code}: {r.text[:400]}"
+            )
+        b64 = r.json()["artifacts"][0]["base64"]
+        return PILImage.open(io.BytesIO(base64.b64decode(b64))).convert("RGBA")
 
-    def _upscale_image(self, img, upscaler, scale: int):
-        """Upscale one PIL Image. Uses NEAREST for tiny art, ESRGAN otherwise."""
-        import numpy as np
+    def _upscale_with_ncnn(self, img, scale: int):
+        """
+        Upscale a PIL image with Real-ESRGAN-ncnn-vulkan (Vulkan — works on Intel UHD).
+        Falls back to PIL LANCZOS if the binary is not installed.
+        """
+        import subprocess, tempfile
+        from PIL import Image as PILImage
+
+        ncnn_exe = self._detect_ncnn()
+        if not ncnn_exe:
+            # Soft fallback — better than failing; user sees clean LANCZOS until ncnn installed
+            w, h = img.width * scale, img.height * scale
+            return img.resize((w, h), PILImage.LANCZOS)
+
+        ncnn_model = self._ncnn_model_var.get()
+        with tempfile.TemporaryDirectory(prefix="revengine_up_") as tmp:
+            src = Path(tmp) / "src.png"
+            out = Path(tmp) / "out.png"
+            img.convert("RGBA").save(str(src))
+            r = subprocess.run(
+                [ncnn_exe,
+                 "-i", str(src),
+                 "-o", str(out),
+                 "-n", ncnn_model,
+                 "-s", str(scale),
+                 "-f", "png",
+                 "-g", "0"],
+                capture_output=True, text=True, timeout=120,
+            )
+            if r.returncode != 0:
+                raise RuntimeError(f"ncnn: {r.stderr[-300:]}")
+            return PILImage.open(str(out)).convert("RGBA")
+
+    def _enhance_with_flux(self, img, strength: float, prompt: str,
+                            neg_prompt: str, scale: int):
+        """
+        Enhance one PIL Image via NVIDIA NIM FLUX.1-schnell (text-to-image).
+
+        Tiny sprites (≤ _SMALL_PX) bypass FLUX → NEAREST resize.
+        All others: snap target dims to nearest NIM-valid size.
+        """
+        from PIL import Image as PILImage
+
+        if img.width <= self._SMALL_PX or img.height <= self._SMALL_PX:
+            return img.resize((img.width * scale, img.height * scale), PILImage.NEAREST)
+
+        tw = self._snap_nim_size(img.width  * scale)
+        th = self._snap_nim_size(img.height * scale)
+
+        return self._nim_generate(
+            model  = self.NIM_MODEL,
+            prompt = prompt,
+            width  = tw,
+            height = th,
+        )
+
+    def _generate_texture_flux(self, img, asset_stem: str,
+                                user_prompt: str, neg_prompt: str):
+        """
+        Generate a 1024×1024 PBR texture via FLUX.1-dev text-to-image.
+
+        Source textures are 64–256px RGB565 with no recoverable detail.
+        Character name is derived from asset_stem ("locke_t0" → "locke").
+        """
+        clean = re.sub(r"[_\-]t\d+$", "", asset_stem)
+        clean = clean.replace("_", " ").replace("-", " ")
+        tex_prompt = (
+            f"{self.DEFAULT_TEX_PROMPT}, character: {clean}. "
+            f"{user_prompt}"
+        )
+        return self._nim_generate(
+            model  = self.NIM_MODEL_T2I,
+            prompt = tex_prompt,
+            width  = self.NIM_TEX_SIZE,
+            height = self.NIM_TEX_SIZE,
+        )
+
+    def _scale_pil_fast(self, img, scale: int):
+        """Fast PIL resize for video frames (no API call)."""
         from PIL import Image as PILImage
         if img.width <= self._SMALL_PX or img.height <= self._SMALL_PX:
             return img.resize((img.width * scale, img.height * scale), PILImage.NEAREST)
-        arr = np.array(img.convert("RGB"))
-        out_arr, _ = upscaler.enhance(arr, outscale=scale)
-        return PILImage.fromarray(out_arr)
+        return img.resize((img.width * scale, img.height * scale), PILImage.LANCZOS)
+
+    def _get_prompt(self) -> str:
+        return self._prompt_txt.get("1.0", "end-1c").strip() or self.DEFAULT_PROMPT
+
+    def _get_neg(self) -> str:
+        return self._neg_txt.get("1.0", "end-1c").strip() or self.DEFAULT_NEG
 
     def _make_thumb(self, img):
         """Return a _THUMB_PX square thumbnail PIL Image."""
@@ -5601,15 +5912,15 @@ class UpscaleTab(tk.Frame):
         resample = PILImage.NEAREST if img.width <= t else PILImage.LANCZOS
         return img.resize((t, t), resample)
 
-    def _run_pipeline(self, selected: List[str], scale: int, model_name: str):
+    def _run_pipeline(self, selected: List[str], scale: int,
+                       strength: float, prompt: str, neg: str):
         from PIL import Image as PILImage
 
-        try:
-            upscaler = self._build_upscaler(model_name, scale)
-            self.after(0, self._log_line, f"Loaded {model_name} (scale={scale}×)")
-        except Exception as e:
-            self.after(0, self._log_line, f"ESRGAN load failed: {e}")
-            return
+        ncnn_exe = self._detect_ncnn()
+        self.after(0, self._log_line,
+                   f"Real-ESRGAN-ncnn  model={self._ncnn_model_var.get()}  "
+                   f"scale={scale}×  "
+                   f"({'binary found' if ncnn_exe else 'LANCZOS fallback — install ncnn for ESRGAN'})")
 
         # Build job list: (cat, decode_fn, out_path)
         jobs = []
@@ -5703,7 +6014,9 @@ class UpscaleTab(tk.Frame):
                     continue
 
                 out_path.parent.mkdir(parents=True, exist_ok=True)
-                up = self._upscale_image(img, upscaler, scale)
+
+                up = self._upscale_with_ncnn(img, scale)
+
                 up.save(str(out_path), format="PNG")
                 ok += 1
 
@@ -5719,7 +6032,7 @@ class UpscaleTab(tk.Frame):
                     "before_pil": before_th,
                     "after_pil":  after_th,
                     "status":     "ok",
-                    "params":     {"model": model_name, "scale": scale, "tile": 256},
+                    "params":     {"strength": strength, "scale": scale, "prompt": prompt},
                 })
 
             except Exception as exc:
@@ -5732,7 +6045,7 @@ class UpscaleTab(tk.Frame):
                     "out_path":  out_path,
                     "src_size":  (0, 0),
                     "status":    "failed",
-                    "params":    {"model": model_name, "scale": scale, "tile": 256},
+                    "params":    {"strength": strength, "scale": scale, "prompt": prompt},
                 })
 
             if i % 10 == 0 or i == total:
@@ -5744,7 +6057,7 @@ class UpscaleTab(tk.Frame):
             if self._stop:
                 break
             try:
-                result = self._process_smk(smk, upscaler, scale, model_name, out_root)
+                result = self._process_smk(smk, scale, strength, prompt, neg, out_root)
                 if result:
                     self.after(0, self._add_result, result)
                     cine_ok += 1
@@ -5769,9 +6082,10 @@ class UpscaleTab(tk.Frame):
         r = self._results[idx]
         if not r.get("decode_fn"):
             return
-        model  = self._redo_model_var.get()
-        scale  = int(self._redo_scale_var.get())
-        tile   = int(self._redo_tile_var.get())
+        strength = float(self._redo_strength_var.get())
+        scale    = int(self._redo_scale_var.get())
+        prompt   = self._get_prompt()
+        neg      = self._get_neg()
 
         self._running = True
         self._start_btn.config(state="disabled")
@@ -5780,12 +6094,11 @@ class UpscaleTab(tk.Frame):
 
         def _worker():
             try:
-                upscaler = self._build_upscaler(model, scale, tile)
                 img = r["decode_fn"]()
                 if img is None:
                     self.after(0, self._log_line, f"Redo: decode returned None for {r['name']}")
                     return
-                up = self._upscale_image(img, upscaler, scale)
+                up = self._upscale_with_ncnn(img, scale)
                 r["out_path"].parent.mkdir(parents=True, exist_ok=True)
                 up.save(str(r["out_path"]), format="PNG")
 
@@ -5794,7 +6107,7 @@ class UpscaleTab(tk.Frame):
                 r["before_pil"] = self._make_thumb(img)
                 r["after_pil"]  = self._make_thumb(up)
                 r["status"]     = "ok"
-                r["params"]     = {"model": model, "scale": scale, "tile": tile}
+                r["params"]     = {"strength": strength, "scale": scale, "prompt": prompt}
 
                 self.after(0, self._rebuild_card, idx)
                 if self._sel_idx == idx:
@@ -5940,6 +6253,96 @@ class UpscaleTab(tk.Frame):
             self.after(0, self._install_btn.config,
                        {"state": "normal", "text": "Install to project"})
 
+    # ── Real-ESRGAN-ncnn-vulkan helpers ───────────────────────────────────────
+
+    @staticmethod
+    def _detect_ncnn() -> Optional[str]:
+        """Return path to realesrgan-ncnn-vulkan.exe or None."""
+        import shutil
+        local = ENGINE_DIR / "tools" / "realesrgan-ncnn" / "realesrgan-ncnn-vulkan.exe"
+        if local.exists():
+            return str(local)
+        ncnn_dir = ENGINE_DIR / "tools" / "realesrgan-ncnn"
+        candidates = list(ncnn_dir.glob("*ncnn-vulkan*.exe"))
+        if candidates:
+            return str(candidates[0])
+        p = shutil.which("realesrgan-ncnn-vulkan")
+        return p
+
+    def _update_ncnn_status(self):
+        exe = self._detect_ncnn()
+        if exe:
+            self._ncnn_status_lbl.config(text="✓ found", fg=ACCENT3)
+            self._ncnn_install_btn.config(state="disabled", bg=BG_CARD, fg=FG_DIM)
+        else:
+            self._ncnn_status_lbl.config(text="✗ not found", fg=RED)
+            self._ncnn_install_btn.config(state="normal", bg=ACCENT2, fg="#000")
+
+    def _install_ncnn(self):
+        if self._running:
+            self._status.set("Wait for current operation to finish")
+            return
+        self._ncnn_install_btn.config(state="disabled", text="Installing…")
+        threading.Thread(target=self._install_ncnn_worker, daemon=True).start()
+
+    def _install_ncnn_worker(self):
+        import zipfile, io
+        # Portable ncnn-vulkan binary — works on any NVIDIA/AMD/Intel GPU via Vulkan
+        NCNN_URL = (
+            "https://github.com/xinntao/Real-ESRGAN/releases/download/"
+            "v0.2.5.0/realesrgan-ncnn-vulkan-20220424-windows.zip"
+        )
+        dest_dir = ENGINE_DIR / "tools" / "realesrgan-ncnn"
+        try:
+            import requests as req
+            self.after(0, self._log_line, "Downloading Real-ESRGAN-ncnn-vulkan (~30 MB)…")
+            resp = req.get(NCNN_URL, stream=True, timeout=120)
+            resp.raise_for_status()
+
+            total = int(resp.headers.get("content-length", 0))
+            downloaded = 0
+            chunks = []
+            for chunk in resp.iter_content(chunk_size=1 << 16):
+                chunks.append(chunk)
+                downloaded += len(chunk)
+                if total:
+                    pct = downloaded / total * 100
+                    self.after(0, lambda p=pct: setattr(self._prog, "value", p)
+                               if hasattr(self, "_prog") else None)
+
+            self.after(0, self._log_line, "Extracting…")
+            data = b"".join(chunks)
+            dest_dir.mkdir(parents=True, exist_ok=True)
+            with zipfile.ZipFile(io.BytesIO(data)) as zf:
+                names = zf.namelist()
+                # Detect common top-level directory prefix (handles both flat and nested zips)
+                top = ""
+                if names:
+                    candidate = names[0].split("/")[0] + "/"
+                    if all(n.startswith(candidate) or n == candidate.rstrip("/") for n in names):
+                        top = candidate
+                for member in names:
+                    rel = member[len(top):]
+                    if not rel:
+                        continue
+                    dest = dest_dir / rel
+                    if member.endswith("/"):
+                        dest.mkdir(parents=True, exist_ok=True)
+                    else:
+                        dest.parent.mkdir(parents=True, exist_ok=True)
+                        dest.write_bytes(zf.read(member))
+
+            exe = dest_dir / "realesrgan-ncnn-vulkan.exe"
+            self.after(0, self._log_line,
+                       f"Real-ESRGAN-ncnn installed → {exe}")
+            self.after(0, self._update_ncnn_status)
+
+        except Exception as exc:
+            self.after(0, self._log_line, f"ncnn install failed: {exc}")
+        finally:
+            self.after(0, self._ncnn_install_btn.config,
+                       {"state": "normal", "text": "Install to project"})
+
     def _find_smk_files(self) -> List[Path]:
         """Collect all .smk/.SMK files from known game directories."""
         search_dirs = [
@@ -5960,81 +6363,165 @@ class UpscaleTab(tk.Frame):
                         results.append(f)
         return sorted(results)
 
-    def _process_smk(self, smk: Path, upscaler, scale: int,
-                      model_name: str, out_root: Path) -> Optional[Dict]:
-        """Full SMK→frames→ESRGAN→MP4 pipeline for one video. Returns result dict."""
-        import subprocess, tempfile, shutil
+    def _process_smk(self, smk: Path, scale: int, strength: float,
+                      prompt: str, neg: str, out_root: Path) -> Optional[Dict]:
+        """
+        SMK → upscaled MP4.
+
+        Fast path  (ncnn installed):
+          FFmpeg extracts PNG frames → realesrgan-ncnn-vulkan batch-upscales
+          the entire frames directory on the GPU in one call → FFmpeg re-encodes.
+
+        Fallback (ncnn not installed):
+          Single FFmpeg pass with pp=de/fd deblock + lanczos scale filter.
+        """
+        import subprocess, tempfile
         from PIL import Image as PILImage
 
         ff = self._ffmpeg_path_var.get().strip()
         if not ff:
             raise RuntimeError("FFmpeg path not set")
 
-        out_dir  = out_root / "cinematix"
+        ncnn_exe   = self._detect_ncnn()
+        ncnn_model = self._ncnn_model_var.get()
+        out_dir    = out_root / "cinematix"
         out_dir.mkdir(parents=True, exist_ok=True)
-        out_mp4  = out_dir / f"{smk.stem}_4x.mp4"
+        out_mp4    = out_dir / f"{smk.stem}_{scale}x.mp4"
 
-        self.after(0, self._log_line, f"Processing {smk.name} …")
+        first_before = first_after = None
 
-        with tempfile.TemporaryDirectory(prefix="revengine_cine_") as tmp:
-            frames_raw = Path(tmp) / "raw"
-            frames_up  = Path(tmp) / "up"
-            frames_raw.mkdir()
-            frames_up.mkdir()
+        if ncnn_exe:
+            # ── Fast GPU path ─────────────────────────────────────────────────
+            with tempfile.TemporaryDirectory(prefix="revengine_cine_") as tmp:
+                frames_raw = Path(tmp) / "raw"
+                frames_up  = Path(tmp) / "up"
+                frames_raw.mkdir()
+                frames_up.mkdir()
 
-            # 1. Decode SMK → PNG frames
-            self.after(0, self._log_line, f"  [{smk.name}] Extracting frames…")
-            r1 = subprocess.run(
-                [ff, "-y", "-i", str(smk),
-                 "-vf", "fps=15",
-                 str(frames_raw / "%04d.png")],
-                capture_output=True, text=True)
-            if r1.returncode != 0:
-                raise RuntimeError(f"ffmpeg decode failed: {r1.stderr[-300:]}")
+                # 1. Decode SMK → PNG frames (15 fps)
+                self.after(0, self._log_line,
+                           f"  [{smk.name}] Extracting frames…")
+                r1 = subprocess.run(
+                    [ff, "-y", "-i", str(smk), "-vf", "fps=15",
+                     str(frames_raw / "%04d.png")],
+                    capture_output=True, text=True, timeout=120)
+                if r1.returncode != 0:
+                    raise RuntimeError(f"FFmpeg extract: {r1.stderr[-300:]}")
 
-            frame_paths = sorted(frames_raw.glob("*.png"))
-            if not frame_paths:
-                raise RuntimeError("No frames extracted from SMK")
+                frame_paths = sorted(frames_raw.glob("*.png"))
+                if not frame_paths:
+                    raise RuntimeError("No frames extracted from SMK")
 
+                first_before = PILImage.open(str(frame_paths[0])).copy()
+
+                # 2. Batch upscale entire directory on GPU
+                self.after(0, self._log_line,
+                           f"  [{smk.name}] {len(frame_paths)} frames → "
+                           f"Real-ESRGAN-ncnn ×{scale} ({ncnn_model})…")
+                r2 = subprocess.run(
+                    [ncnn_exe,
+                     "-i", str(frames_raw),
+                     "-o", str(frames_up),
+                     "-n", ncnn_model,
+                     "-s", str(scale),
+                     "-f", "png",
+                     "-g", "0"],       # GPU 0 (Vulkan — picks NVIDIA automatically)
+                    capture_output=True, text=True, timeout=600)
+                if r2.returncode != 0:
+                    raise RuntimeError(f"ncnn: {r2.stderr[-300:]}")
+
+                up_paths = sorted(frames_up.glob("*.png"))
+                if up_paths:
+                    first_after = PILImage.open(str(up_paths[0])).copy()
+
+                # 3. Re-encode upscaled frames → H.264
+                self.after(0, self._log_line,
+                           f"  [{smk.name}] Encoding MP4…")
+                r3 = subprocess.run(
+                    [ff, "-y", "-framerate", "15",
+                     "-i", str(frames_up / "%04d.png"),
+                     "-c:v", "libx264", "-crf", "16", "-preset", "slow",
+                     "-pix_fmt", "yuv420p", str(out_mp4)],
+                    capture_output=True, text=True, timeout=300)
+                if r3.returncode != 0:
+                    raise RuntimeError(f"FFmpeg encode: {r3.stderr[-300:]}")
+
+            method_tag = f"esrgan-ncnn:{ncnn_model}"
+
+        else:
+            # ── FLUX NIM frame-by-frame (cloud, no local GPU needed) ──────────
+            flux_step = int(self._cine_step_var.get())
             self.after(0, self._log_line,
-                       f"  [{smk.name}] {len(frame_paths)} frames — upscaling…")
+                       f"  [{smk.name}] No ncnn — FLUX NIM ×{scale} "
+                       f"every {flux_step} frame(s)…")
 
-            # 2. Upscale each frame
-            first_before = first_after = None
-            for fp in frame_paths:
-                img = PILImage.open(str(fp))
-                up  = self._upscale_image(img, upscaler, scale)
-                out_fp = frames_up / fp.name
-                up.save(str(out_fp), format="PNG")
-                if first_before is None:
-                    first_before = img.copy()
-                    first_after  = up.copy()
+            with tempfile.TemporaryDirectory(prefix="revengine_cine_") as tmp:
+                frames_raw = Path(tmp) / "raw"
+                frames_up  = Path(tmp) / "up"
+                frames_raw.mkdir()
+                frames_up.mkdir()
 
-            # 3. Re-encode upscaled frames → MP4
-            self.after(0, self._log_line, f"  [{smk.name}] Encoding MP4…")
-            r2 = subprocess.run(
-                [ff, "-y", "-framerate", "15",
-                 "-i", str(frames_up / "%04d.png"),
-                 "-c:v", "libx264", "-crf", "18",
-                 "-pix_fmt", "yuv420p", str(out_mp4)],
-                capture_output=True, text=True)
-            if r2.returncode != 0:
-                raise RuntimeError(f"ffmpeg encode failed: {r2.stderr[-300:]}")
+                # 1. Decode SMK → PNG frames
+                r1 = subprocess.run(
+                    [ff, "-y", "-i", str(smk), "-vf", "fps=15",
+                     str(frames_raw / "%04d.png")],
+                    capture_output=True, text=True, timeout=120)
+                if r1.returncode != 0:
+                    raise RuntimeError(f"FFmpeg extract: {r1.stderr[-300:]}")
+
+                frame_paths = sorted(frames_raw.glob("*.png"))
+                if not frame_paths:
+                    raise RuntimeError("No frames extracted from SMK")
+
+                n_frames = len(frame_paths)
+                self.after(0, self._log_line,
+                           f"  [{smk.name}] {n_frames} frames — "
+                           f"FLUX on {(n_frames + flux_step - 1) // flux_step} "
+                           f"key frames, LANCZOS fill…")
+
+                # 2. Enhance key frames with FLUX, fill gaps with LANCZOS
+                for fi, fp in enumerate(frame_paths):
+                    if self._stop:
+                        raise RuntimeError("Stopped by user")
+                    img = PILImage.open(str(fp))
+                    up = self._scale_pil_fast(img, scale)
+
+                    out_fp = frames_up / fp.name
+                    up.convert("RGB").save(str(out_fp), format="PNG")
+
+                    if fi == 0:
+                        first_before = img.copy()
+                        first_after  = up.copy()
+
+                    if fi % 20 == 0 or fi == n_frames - 1:
+                        self.after(0, self._log_line,
+                                   f"    [{smk.name}] {fi + 1}/{n_frames}…")
+
+                # 3. Re-encode → MP4
+                self.after(0, self._log_line, f"  [{smk.name}] Encoding MP4…")
+                r3 = subprocess.run(
+                    [ff, "-y", "-framerate", "15",
+                     "-i", str(frames_up / "%04d.png"),
+                     "-c:v", "libx264", "-crf", "16", "-preset", "slow",
+                     "-pix_fmt", "yuv420p", str(out_mp4)],
+                    capture_output=True, text=True, timeout=300)
+                if r3.returncode != 0:
+                    raise RuntimeError(f"FFmpeg encode: {r3.stderr[-300:]}")
+
+            method_tag = f"flux-nim:step={flux_step}"
 
         self.after(0, self._log_line,
-                   f"  [{smk.name}] Done → {out_mp4.name}")
+                   f"  [{smk.name}] Done [{method_tag}] → {out_mp4.name}")
 
-        # Build thumbnails from first frame
         t = self._THUMB_PX
         before_th = first_before.resize((t, t), PILImage.LANCZOS) if first_before else None
         after_th  = first_after.resize((t, t),  PILImage.LANCZOS) if first_after  else None
 
-        # decode_fn for redo: re-read first frame from original SMK
         def _redo_decode_fn(smk_path=smk):
             import subprocess, tempfile
             ff2 = self._ffmpeg_path_var.get().strip()
             with tempfile.TemporaryDirectory() as td:
-                out_f = Path(td) / "0001.png"
+                out_f = Path(td) / "frame.png"
                 subprocess.run([ff2, "-y", "-i", str(smk_path),
                                 "-vframes", "1", str(out_f)],
                                capture_output=True)
@@ -6057,8 +6544,8 @@ class UpscaleTab(tk.Frame):
             "before_pil": before_th,
             "after_pil":  after_th,
             "status":     "ok",
-            "params":     {"model": model_name, "scale": scale, "tile": 256},
-            "_smk_path":  smk,          # stored for redo
+            "params":     {"strength": strength, "scale": scale, "prompt": prompt},
+            "_smk_path":  smk,
         }
 
     # ── Asset decode helpers ─────────────────────────────────────────────────
@@ -6173,7 +6660,9 @@ class AssetStudio(tk.Tk):
         self._cine_tab  = CinematiXTab(self._nb, self._status)
         self._ui_tab    = UIResourcesTab(self._nb, self._status)
         self._ahk_tab     = AhkuilonTab(self._nb, self._status)
-        self._upscale_tab = UpscaleTab(self._nb, self._status)
+        self._upscale_tab    = UpscaleTab(self._nb, self._status)
+        from asset_studio_modernize import ModernizeTab
+        self._modernize_tab  = ModernizeTab(self._nb, self._status)
 
         self._nb.add(self._map_tab,      text="  World Map  ")
         self._nb.add(self._char_tab,     text="  Characters  ")
@@ -6186,7 +6675,8 @@ class AssetStudio(tk.Tk):
         self._nb.add(self._cine_tab,     text="  Cinematix  ")
         self._nb.add(self._ui_tab,       text="  UI Resources  ")
         self._nb.add(self._ahk_tab,      text="  Ahkuilon  ")
-        self._nb.add(self._upscale_tab,  text="  Upscale  ")
+        self._nb.add(self._upscale_tab,   text="  Upscale  ")
+        self._nb.add(self._modernize_tab, text="  Modernize 3D  ")
 
         # Update header counts after brief delay
         self.after(2000, self._update_counts)
