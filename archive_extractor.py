@@ -28,8 +28,9 @@ REVENANT_ARCHIVES = {
     '.rvm': 'Map/module archive',
 }
 
-GAME_DIR = Path("C:/GOG Games/Revenant")
-EXTRACT_DIR = Path("C:/Users/chris/OneDrive/Desktop/Revengine/extracted")
+_HERE = Path(__file__).resolve().parent
+GAME_DIR = _HERE / "game"
+EXTRACT_DIR = _HERE / "extracted"
 
 
 @dataclass

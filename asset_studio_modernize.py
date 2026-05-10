@@ -46,27 +46,20 @@ BORDER   = "#2a2a4e"
 
 # Locate the project root relative to this file
 _HERE       = Path(__file__).resolve().parent
-ENGINE_DIR  = _HERE
-BLENDER_EXE = Path("C:/Program Files/Blender Foundation/Blender 5.1/blender.exe")
-PIPELINE_PY = ENGINE_DIR / "tools" / "modernize_pipeline.py"
-NCNN_EXE    = ENGINE_DIR / "tools" / "realesrgan-ncnn" / "realesrgan-ncnn-vulkan.exe"
-OUT_DIR     = ENGINE_DIR / "test_renders_hd"
-
-
-# ---------------------------------------------------------------------------
-# Helpers
-# ---------------------------------------------------------------------------
-
+BLENDER_EXE = Path("blender")
 def _ts() -> str:
     return datetime.datetime.now().strftime("%H:%M:%S")
 
 
-def _detect_ncnn() -> Optional[str]:
+def _detect_ncnn(cfg) -> Optional[str]:
     # Check canonical path first
-    if NCNN_EXE.exists():
-        return str(NCNN_EXE)
+    exe_path = cfg.engine_dir / "tools" / "realesrgan-ncnn" / "realesrgan-ncnn-vulkan.exe"
+    if exe_path.exists():
+        return str(exe_path)
     # Glob for any *ncnn-vulkan*.exe in the tools directory (handles truncated zip extractions)
-    ncnn_dir = ENGINE_DIR / "tools" / "realesrgan-ncnn"
+    ncnn_dir = cfg.engine_dir / "tools" / "realesrgan-ncnn"
+    if not ncnn_dir.exists():
+        return None
     candidates = list(ncnn_dir.glob("*ncnn-vulkan*.exe"))
     if candidates:
         return str(candidates[0])
@@ -145,7 +138,8 @@ class ModernizeTab(tk.Frame):
         "Done",
     ]
 
-    def __init__(self, parent, status_bar):
+    def __init__(self, parent, config, status_bar):
+        self.cfg = config
         super().__init__(parent, bg=BG_DARK)
         self._status   = status_bar
         self._running  = False
@@ -190,7 +184,7 @@ class ModernizeTab(tk.Frame):
                  font=("Segoe UI", 8, "bold")).pack(anchor="w", padx=10)
         out_row = tk.Frame(left, bg=BG_PANEL)
         out_row.pack(fill="x", padx=10, pady=(2, 4))
-        self._out_var = tk.StringVar(value=str(OUT_DIR))
+        self._out_var = tk.StringVar(value=str(self.cfg.renders_dir / "test_renders_hd"))
         tk.Entry(out_row, textvariable=self._out_var, bg=BG_CARD, fg=FG_TEXT,
                  font=("Consolas", 8), relief="flat",
                  insertbackground=FG_TEXT).pack(side="left", fill="x", expand=True)
@@ -297,7 +291,7 @@ class ModernizeTab(tk.Frame):
                   command=self._open_out).pack(side="left")
 
         # ncnn status
-        ncnn_ok = bool(_detect_ncnn())
+        ncnn_ok = bool(_detect_ncnn(self.cfg))
         blender_ok = bool(_detect_blender())
         status_txt = (
             ("✓ ncnn" if ncnn_ok else "✗ ncnn (LANCZOS fallback)") +
@@ -357,8 +351,8 @@ class ModernizeTab(tk.Frame):
     # ── Browse / open helpers ─────────────────────────────────────────────────
 
     def _browse_model(self):
-        chars_dir = ENGINE_DIR / "extracted" / "imagery" / "Imagery" / "Chars"
-        init_dir  = str(chars_dir) if chars_dir.exists() else str(ENGINE_DIR / "extracted")
+        chars_dir = self.cfg.engine_dir / "extracted" / "imagery" / "Imagery" / "Chars"
+        init_dir  = str(chars_dir) if chars_dir.exists() else str(self.cfg.engine_dir / "extracted")
         p = filedialog.askopenfilename(
             title="Select .i3d model",
             initialdir=init_dir,
@@ -390,7 +384,7 @@ class ModernizeTab(tk.Frame):
     # ── Log helpers ───────────────────────────────────────────────────────────
 
     def _log_line(self, text: str, tag: str = "info"):
-        def _do():
+        def _do(self=self, text=text, tag=tag):
             self._log.config(state="normal")
             self._log.insert("end", f"{_ts()}  {text}\n", tag)
             self._log.see("end")
@@ -410,7 +404,7 @@ class ModernizeTab(tk.Frame):
     # ── Progress helper ───────────────────────────────────────────────────────
 
     def _set_progress(self, done: int, total: int, msg: str = ""):
-        def _do():
+        def _do(self=self, done=done, total=total, msg=msg):
             pct = int(done / total * 100) if total else 0
             self._prog["value"] = pct
             label = f"Step {done}/{total} — {msg}" if msg else f"{done}/{total}"
@@ -587,7 +581,7 @@ class ModernizeTab(tk.Frame):
 
     def _upscale_texture(self, src_path: str, dst_path: str, scale: int):
         from PIL import Image as _PIL
-        ncnn = _detect_ncnn()
+        ncnn = _detect_ncnn(self.cfg)
 
         # Resolve GPU flag from combobox selection
         selected_label = self._gpu_var.get()
@@ -630,7 +624,7 @@ class ModernizeTab(tk.Frame):
 
         cmd = [
             blender, "--background",
-            "--python", str(PIPELINE_PY),
+            "--python", str(self.cfg.engine_dir / "tools" / "modernize_pipeline.py"),
             "--",
             "--input",  str(gltf_path),
             "--output", str(out_glb),

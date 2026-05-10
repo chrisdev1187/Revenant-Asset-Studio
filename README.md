@@ -464,37 +464,36 @@ A stored value of 0 is a null pointer (do not dereference).
 
 ```
 Revengine/
-├── asset_studio.py              Main GUI application (Tkinter)
-├── asset_studio_modernize.py    "Modernize 3D" tab — full pipeline UI + worker thread
+├── asset_studio.py              Entry point for the Studio application
+├── asset_studio_modernize.py    "Modernize 3D" tab logic
 ├── archive_extractor.py         Batch ZIP extractor for .rvr/.rvi/.rvm
 ├── map_parser.py                Zone/tile map parser
-├── export_zone_maps.py          CLI: batch-export automap zones to PNG
-├── diagnose_automaps.py         Automap tile diagnostic tool
 ├── archaeology.py               Low-level format archaeology helpers
 │
-├── UPSCALING_101.md             Research doc: all findings, tool comparisons, pipeline design, gaps
+├── core/                        Business logic & centralized state
+│   ├── config.py                Centralized configuration (paths, settings)
+│   ├── constants.py             UI theme, data mappings, and PIL status
+│   ├── parsers.py               Revenant-specific data and asset location logic
+│   └── godot_exporter.py        Godot systematic porting pipeline
 │
-├── tools/
-│   ├── modernize_pipeline.py    Blender headless script — CC subdivide + AO bake + PBR wire + GLB export
-│   ├── ffmpeg.exe               Auto-downloaded by the Upscale tab (gitignored)
-│   └── realesrgan-ncnn/
-│       └── realesrgan-ncnn-vulkan.exe   GPU upscaler (Vulkan, Nvidia/AMD/Intel; install via Upscale tab)
+├── ui/                          Tkinter graphical user interface
+│   ├── app.py                   Main window and notebook orchestration
+│   ├── widgets.py               Shared UI components (StatusBar, ScrollFrame)
+│   └── tabs/                    Module-per-tab logic
+│       ├── godot_export.py      Systematic porting & modernization management
+│       └── ...                  (World Map, Characters, Models, etc.)
 │
-└── decoders/
-    ├── i3d.py               .i3d skeletal model decoder (geometry + animation)
-    │                          decode_i3d_geometry()   — full mesh + rig
-    │                          decode_i3d_textures()   — all embedded textures
-    │                          load_state()            — animate in-place
-    │                          list_anim_states()      — state names only
-    │                          export_obj()            — Wavefront OBJ writer
-    ├── gltf_export.py       glTF 2.0 exporter (skinned mesh + all animation clips)
-    │                          export_gltf()
-    │                          Bone transforms: local-space (world × parent_world_inv)
-    ├── pbr_maps.py          PBR map generator — pure Python, no GPU
-    │                          generate_normal_map(diffuse, strength=2.0)  — Sobel gradient → tangent-space normal
-    │                          generate_roughness_map(diffuse)             — inverted luminance roughness
-    ├── i2d.py               .i2d sprite decoder
-    └── cgsr.py              CGSR header parser (shared)
+├── decoders/                    Low-level format decoders
+│   ├── i3d.py                   .i3d skeletal model decoder
+│   ├── i2d.py                   .i2d sprite decoder
+│   ├── gltf_export.py           glTF 2.0 conversion
+│   └── pbr_maps.py              Sobel-based PBR map generation
+│
+├── tools/                       Automation & external scripts
+│   └── modernize_pipeline.py    Blender headless modernization script
+│
+├── UPSCALING_101.md             Research doc: pipeline design and findings
+└── REVENANT_REVERSE_ENGINEERING.md Authorities technical record
 ```
 
 ---

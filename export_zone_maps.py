@@ -21,16 +21,12 @@ from pathlib import Path
 # Allow running from the repo root without installing
 sys.path.insert(0, str(Path(__file__).parent))
 
-from RevEngine.asset_studio import (
-    stitch_zone_map,
-    get_available_zones,
-    get_automap_tiles,
-    RENDERS_DIR,
-    AHKUILON,
-)
+from core.config import Config
+from core.parsers import stitch_zone_map, get_all_zone_keys, get_automap_tiles
 
 
 def main():
+    config = Config(Path(__file__).resolve().parent)
     parser = argparse.ArgumentParser(
         description="Batch-export Revenant automap zones to PNG."
     )
@@ -52,28 +48,13 @@ def main():
     )
     args = parser.parse_args()
 
-    # --game-dir is forwarded to asset_studio via sys.argv trick
     if args.game_dir:
-        sys.argv += ["--game-dir", args.game_dir]
-        # Re-import to pick up the new path
-        import importlib
-        import RevEngine.asset_studio as _as
-        importlib.reload(_as)
-        from RevEngine.asset_studio import (
-            stitch_zone_map as _s,
-            get_available_zones as _g,
-            get_automap_tiles as _t,
-            RENDERS_DIR as _rd,
-        )
-        stitch_fn   = _s
-        zones_fn    = _g
-        tiles_fn    = _t
-        renders_dir = Path("C:/Users/chris/OneDrive/Desktop/Revengine/test_renders")
-    else:
-        stitch_fn   = stitch_zone_map
-        zones_fn    = get_available_zones
-        tiles_fn    = get_automap_tiles
-        renders_dir = RENDERS_DIR
+        config.game_dir = Path(args.game_dir)
+
+    stitch_fn   = lambda z: stitch_zone_map(config, z)
+    zones_fn    = lambda: [z for m, z in get_all_zone_keys(config)]
+    tiles_fn    = lambda z: get_automap_tiles(config, z)
+    renders_dir = config.renders_dir
 
     out_dir = Path(args.out) if args.out else renders_dir
     out_dir.mkdir(parents=True, exist_ok=True)
@@ -81,7 +62,6 @@ def main():
     zones = zones_fn()
     if not zones:
         print("ERROR: No automap tiles found.")
-        print(f"Expected BMP files in: {AHKUILON / 'Automaps'}")
         sys.exit(1)
 
     if args.list:
