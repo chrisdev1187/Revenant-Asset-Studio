@@ -11,9 +11,10 @@ import sys, argparse
 from pathlib import Path
 from collections import defaultdict
 
+_HERE = Path(__file__).resolve().parent
 parser = argparse.ArgumentParser()
-parser.add_argument("--game-dir", default="C:/GOG Games/Revenant")
-parser.add_argument("--extract-dir", default="C:/Users/chris/OneDrive/Desktop/Revengine/extracted")
+parser.add_argument("--game-dir", default=str(_HERE / "game"))
+parser.add_argument("--extract-dir", default=str(_HERE / "extracted"))
 args = parser.parse_args()
 
 game_dir    = Path(args.game_dir)

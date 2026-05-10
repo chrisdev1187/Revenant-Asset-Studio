@@ -1277,11 +1277,13 @@ likely contains: frame offsets, bounding box, pivot point. Goals:
 - Map state names (from `.i3d` adjacent `.dat` or string table) to frame indices
 - Export per-frame OBJ or animate in the tkinter viewer
 
-### Priority 5: MAP Chunk Payload
-- Hexdump first few `.DAT` map files and look for repeating patterns (tile IDs)
-- Identify tile size (likely 8×8 or 16×16 tile grid within each chunk)
-- Map tile IDs to texture assets from the imagery archives
-- Goal: render a textured top-down map view
+### Priority 5: Systematic Godot Modernization
+- **Modular Pipeline**: Transitioned to a `core`/`ui` package structure to handle complex systematic porting logic.
+- **Godot Project Rebuild**:
+  - Decode `MAP` chunk payloads to extract tile positions and IDs.
+  - Implement a systematic `.tscn` generator that instantiates Godot nodes for each Revenant tile.
+  - Use a "Patchable" asset approach: Godot scenes reference stable paths that can be updated with upscaled textures/models without breaking the scene hierarchy.
+  - Automate character glTF 2.0 export with full skeletal animation.
 
 ---
 

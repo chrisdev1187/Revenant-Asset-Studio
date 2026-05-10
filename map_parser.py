@@ -214,7 +214,8 @@ def visualize_map_layer(chunks: List[MapChunk], z_layer: int,
 if __name__ == '__main__':
     import argparse
 
-    MAP_DIR = Path("C:/Users/chris/OneDrive/Desktop/Revengine/extracted/Ahkuilon/Map")
+    _HERE = Path(__file__).resolve().parent
+    MAP_DIR = _HERE / "extracted" / "Ahkuilon" / "Map"
 
     parser = argparse.ArgumentParser(
         description='RevEngine Map Parser - Revenant 1999'
