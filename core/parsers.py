@@ -304,6 +304,9 @@ def scan_dat_frames(path: Path) -> int:
         pass
     return 0
 
+def parse_i3d_anim_count(path: Path) -> int:
+    return len(parse_i3d_anim_states(path))
+
 def get_unextracted_modules(config) -> List[str]:
     unextracted = []
     modules_dir = config.game_dir / "Modules"

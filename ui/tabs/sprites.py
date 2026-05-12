@@ -7,6 +7,10 @@ from typing import List, Dict, Optional, Tuple
 from core.constants import *
 from ui.widgets import *
 from core.parsers import *
+from ui.tabs.models import (
+    _get_sprite_categories, _load_tn_image,
+    GRID_COLS, THUMB_SIZE, CELL_W, CELL_H,
+)
 class SpritesTab(tk.Frame):
     """Browse all sprite thumbnails by category; click to decode full i2d."""
 
@@ -14,7 +18,6 @@ class SpritesTab(tk.Frame):
         self.cfg = config
         super().__init__(parent, bg=BG_MID)
         self._status      = status
-        from ui.tabs.models import _get_sprite_categories
         self._cats        = _get_sprite_categories(self.cfg)
         self._cat         = tk.StringVar(value=self._cats[0] if self._cats else "")
         self._ph_cache: dict[str, "ImageTk.PhotoImage"] = {}

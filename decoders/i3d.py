@@ -598,6 +598,19 @@ def _decode_new(raw: bytes, body_base: int, numverts_hint: int,
                     all_faces.append((ga, gb, gc))
                     all_tex_indices.append(tex_index)
 
+    # Fallback: per-object tex-group parsing produced no faces (e.g. all tex_arr
+    # TOffsets are null).  Read faces globally treating indices as-is; correct for
+    # single-object models, approximate for multi-object ones.
+    if not all_faces and numfaces > 0:
+        for i in range(numfaces):
+            fp = faces_start + i * 6
+            if fp + 6 > len(raw):
+                break
+            a, b, c = struct.unpack_from('<HHH', raw, fp)
+            if a < numverts and b < numverts and c < numverts:
+                all_faces.append((a, b, c))
+                all_tex_indices.append(-1)
+
     if not vertices or not all_faces:
         return None
 

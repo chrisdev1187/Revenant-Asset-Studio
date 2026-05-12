@@ -18,8 +18,12 @@ renders/
 test_renders/
 test_renders_hd/
 
-# Auto-downloaded binaries and tools
-tools/
+# Auto-downloaded binaries (keep Python scripts tracked)
+tools/realesrgan-ncnn/
+tools/ffmpeg*
+tools/*.exe
+tools/*.dll
+tools/*.md
 
 # Root-level scratch files
 glm.bat

@@ -2,11 +2,15 @@ from PIL import Image, ImageTk
 import tkinter as tk
 from tkinter import ttk, filedialog, messagebox
 import threading
+import logging
 from pathlib import Path
 from typing import List, Dict, Optional, Tuple
 from core.constants import *
 from ui.widgets import *
 from core.parsers import *
+
+log = logging.getLogger("RevEngine.Models")
+
 class ModelsTab(tk.Frame):
     def __init__(self, parent, config, status: StatusBar):
         self.cfg = config
@@ -454,7 +458,8 @@ class ModelsTab(tk.Frame):
         if not out:
             return
 
-        textures = getattr(self._viewer, '_textures', [])
+        from decoders.i3d import decode_i3d_textures
+        textures = decode_i3d_textures(geom.path)
         out_path  = Path(out)
         self._status.set(f"Exporting {geom.path.stem}… (baking animations, may take a moment)")
 
@@ -472,10 +477,17 @@ class ModelsTab(tk.Frame):
                 n_anim = len(geom.anim_states)
                 nb     = geom.rig.num_bones
                 if ok:
+                    # Save sidecar PNG texture so Blender can load it manually
+                    # (File → Import → glTF 2.0, then Z → Material Preview)
+                    if textures:
+                        tex_sidecar = out_path.with_name(out_path.stem + "_diffuse.png")
+                        textures[0].convert("RGB").save(str(tex_sidecar))
+                        log.info("  Texture sidecar: %s", tex_sidecar.name)
                     sz_kb = out_path.stat().st_size // 1024
                     log.info("glTF export done: %s (%d KB)", out_path.name, sz_kb)
                     msg = (f"glTF saved: {out_path.name}  "
-                           f"({len(geom.vertices):,} verts · {nb} bones · {n_anim} anim states)")
+                           f"({len(geom.vertices):,} verts · {nb} bones · {n_anim} anim states)"
+                           f"{'  +diffuse.png' if textures else ''}")
                 else:
                     log.warning("glTF export returned False")
                     msg = "glTF export failed"

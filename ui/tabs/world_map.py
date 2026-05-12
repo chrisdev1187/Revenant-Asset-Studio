@@ -4,6 +4,7 @@ from tkinter import ttk, filedialog, messagebox
 import threading
 from pathlib import Path
 from typing import List, Dict, Optional, Tuple
+ZoneKey = Tuple[str, int]
 from core.constants import *
 from ui.widgets import *
 from core.parsers import *
@@ -103,8 +104,8 @@ class WorldMapTab(tk.Frame):
         self._zones = get_all_zone_keys(self.cfg)
 
         # Count unextracted modules so we can prompt the user
-        from core.parsers import _get_unextracted_modules
-        unextracted = _get_unextracted_modules(self.cfg)
+        from core.parsers import get_unextracted_modules
+        unextracted = get_unextracted_modules(self.cfg)
         if unextracted:
             hint = f"  ({len(unextracted)} unextracted module(s): {', '.join(unextracted[:4])}{'…' if len(unextracted)>4 else ''}  — click ⬇ Extract Modules)"
         else:
@@ -151,8 +152,8 @@ class WorldMapTab(tk.Frame):
 
     def _extract_missing_modules(self):
         """Extract any .rvm module files that haven't been extracted yet."""
-        from core.parsers import _get_unextracted_modules
-        unextracted = _get_unextracted_modules(self.cfg)
+        from core.parsers import get_unextracted_modules
+        unextracted = get_unextracted_modules(self.cfg)
         if not unextracted:
             self._status.set("All modules already extracted.")
             return
@@ -312,7 +313,7 @@ class WorldMapTab(tk.Frame):
 
     def _show_diagnose(self):
         """Show a popup with full Automaps directory diagnostic info."""
-        from core.parsers import _all_automap_dirs, _get_unextracted_modules
+        from core.parsers import all_automap_dirs as _all_automap_dirs, get_unextracted_modules as _get_unextracted_modules
         win = tk.Toplevel(self)
         win.title("Automap Diagnostic")
         win.configure(bg=BG_DARK)

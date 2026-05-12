@@ -47,6 +47,7 @@ BORDER   = "#2a2a4e"
 # Locate the project root relative to this file
 _HERE       = Path(__file__).resolve().parent
 BLENDER_EXE = Path("blender")
+
 def _ts() -> str:
     return datetime.datetime.now().strftime("%H:%M:%S")
 
@@ -72,7 +73,25 @@ def _detect_blender() -> Optional[str]:
     if BLENDER_EXE.exists():
         return str(BLENDER_EXE)
     found = shutil.which("blender")
-    return found
+    if found:
+        return found
+    # Windows: Blender installer doesn't add to PATH — scan common locations
+    import sys
+    if sys.platform == "win32":
+        search_roots = [
+            Path(r"C:\Program Files\Blender Foundation"),
+            Path(r"C:\Program Files (x86)\Blender Foundation"),
+            Path.home() / "AppData" / "Local" / "Programs" / "Blender Foundation",
+            Path.home() / "scoop" / "apps" / "blender" / "current",
+        ]
+        for root in search_roots:
+            if not root.exists():
+                continue
+            # e.g. Blender 4.1/blender.exe — pick the highest version
+            candidates = sorted(root.glob("Blender*/blender.exe"), reverse=True)
+            if candidates:
+                return str(candidates[0])
+    return None
 
 
 def _list_gpu_options() -> list[tuple[str, str]]:
@@ -494,20 +513,30 @@ class ModernizeTab(tk.Frame):
             self._log_ok(f"Base gltf: {kb} KB")
             if self._stop_evt.is_set(): raise StopIteration
 
-            # ── Step 3: Upscale texture ───────────────────────────────────────
+            # ── Step 3: Extract / upscale texture ────────────────────────────
+            # Always write the raw texture to a file. Blender can't reliably
+            # unpack data-URI textures from an imported glTF during headless
+            # GLB export, so we pass the texture as a real PNG path instead.
+            raw_tex_path = ""
+            if textures:
+                _raw = tmp / f"{stem}_diffuse_raw.png"
+                textures[0].save(str(_raw))
+                raw_tex_path = str(_raw)
+
             upscaled_tex_path = ""
-            if self._do_upscale.get() and textures:
+            if self._do_upscale.get() and raw_tex_path:
                 self._set_progress(done, steps, "Upscale texture (ncnn-vulkan)")
                 self._log_step("Upscale texture")
                 scale = int(self._scale_var.get())
-                raw_tex_path = tmp / f"{stem}_diffuse_raw.png"
-                textures[0].save(str(raw_tex_path))
                 upscaled_tex_path = str(out_dir / f"{stem}_diffuse.png")
-                self._upscale_texture(str(raw_tex_path), upscaled_tex_path, scale)
+                self._upscale_texture(raw_tex_path, upscaled_tex_path, scale)
                 done += 1
                 self._log_ok(f"Upscaled {textures[0].size[0]}×{textures[0].size[1]} → "
                              f"{textures[0].size[0]*scale}×{textures[0].size[1]*scale}")
                 if self._stop_evt.is_set(): raise StopIteration
+
+            # Pass whichever texture file is best to Blender
+            tex_for_blender = upscaled_tex_path or raw_tex_path
 
             # Choose source for map generation (upscaled if available, else raw)
             from PIL import Image as _PIL
@@ -548,7 +577,7 @@ class ModernizeTab(tk.Frame):
                     gltf_path, out_glb,
                     levels        = self._levels_var.get(),
                     ao_size       = int(self._ao_res.get()) if self._do_ao.get() else 0,
-                    upscaled_tex  = upscaled_tex_path,
+                    upscaled_tex  = tex_for_blender,
                     normal_map    = normal_path,
                     roughness_map = roughness_path,
                 )
@@ -620,7 +649,7 @@ class ModernizeTab(tk.Frame):
                      normal_map: str, roughness_map: str):
         blender = _detect_blender()
         if not blender:
-            raise RuntimeError("Blender not found — install Blender 4.0+ and add to PATH")
+            raise RuntimeError("Blender not found — install Blender and ensure blender.exe is in PATH or Program Files")
 
         cmd = [
             blender, "--background",

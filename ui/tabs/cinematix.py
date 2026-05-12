@@ -67,7 +67,14 @@ class CinematiXTab(tk.Frame):
         self._status.set("Scanning for SMK video files…")
         seen: set = set()
         videos = []
-        search_dirs = [Path("Disk2")] + [self.cfg.game_dir, self.cfg.extract_dir]
+        search_dirs = [
+            self.cfg.game_dir,
+            self.cfg.game_dir / "Disk2",
+            self.cfg.game_dir / "Movies",
+            self.cfg.game_dir / "Cinematix",
+            self.cfg.game_dir / "Video",
+            self.cfg.extract_dir,
+        ]
         for d in search_dirs:
             if not d.exists():
                 continue

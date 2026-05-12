@@ -7,6 +7,7 @@ from typing import List, Dict, Optional, Tuple
 from core.constants import *
 from ui.widgets import *
 from core.parsers import *
+from ui.tabs.cinematix import _UI_CATEGORIES
 class UIResourcesTab(tk.Frame):
     _THUMB = 80   # element tile size
     _BG_W  = 480  # preview max width
@@ -217,7 +218,7 @@ class UIResourcesTab(tk.Frame):
 
         # Decode all frames using fast BGR555 path
         for i in range(n):
-            img = _decode_dat_frame(path, i)
+            img = decode_dat_frame(path, i)
             # If standard decoder got it, convert pixels via fast path for large images
             self._raw_imgs.append(img)
 

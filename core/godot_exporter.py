@@ -6,7 +6,7 @@ from pathlib import Path
 from typing import List, Dict, Optional, Tuple
 from core.config import Config
 from core.parsers import parse_char_def, parse_spell_def, parse_weapon_def, parse_armor_def
-from decoders.i3d import decode_i3d_geometry
+from decoders.i3d import decode_i3d_geometry, decode_i3d_textures
 from decoders.gltf_export import export_gltf
 
 log = logging.getLogger('RevEngine.Godot')
@@ -29,7 +29,8 @@ class GodotExporter:
         try:
             geom = decode_i3d_geometry(i3d_path)
             if not geom: return False
-            if export_gltf(geom, [], out_path):
+            textures = decode_i3d_textures(i3d_path)
+            if export_gltf(geom, textures, out_path):
                 self.generate_tscn_wrapper(stem, 'models')
                 return True
         except Exception as e: log.error(f'Error: {e}')

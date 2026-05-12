@@ -15,8 +15,8 @@ Built on research from nuxdie, MathJazz, and benjcooley.
 | Character sheets | ✅ Full | Portraits, parsed stats from char.def, batch PNG export |
 | Equipment (Weapons/Armor) | ✅ Full | Icons, stats; correct palette transparency + exact name matching |
 | Spells | ✅ Full | Icon, talisman combos, variants, mana, damage type, animation link |
-| Sounds | ✅ Full | 1,743 SFX/voice MP3s + OGG music, filter + playback |
-| Cinematix | ✅ Full | 4 SMK FMV videos, playback via system player |
+| Sounds | ✅ Full | 1,057 WAV effects + 6 MP3 speech + OGG music; 90+ category groups, filter + playback |
+| Cinematix | ✅ Full | SMK FMV videos, playback via system player |
 | 3D Models — geometry | ✅ Full | All 113 characters, skeletal assembly |
 | 3D Models — animation | ✅ Full | All states/frames, scrubber + playback |
 | 3D Models — textures | ✅ Full | Multi-texture, tiling UV, backface cull |
@@ -36,6 +36,29 @@ Built on research from nuxdie, MathJazz, and benjcooley.
 ---
 
 ## Changelog
+
+### 2026-05-12 — Tab fixes, sound categorisation, texture export
+
+**Bug fixes — tab rendering**
+- **Sprites tab:** `_load_tn_image`, `GRID_COLS`, `THUMB_SIZE`, `CELL_W`, `CELL_H` were imported inside `__init__` (function-local scope), making them invisible to all other methods. Moved to module-level import — thumbnails and decoded i2d sprites now display correctly.
+- **UI Resources tab:** `_decode_dat_frame` typo fixed → `decode_dat_frame`; frames now decode and preview correctly.
+- **3D Models tab:** `log` was never imported into `models.py`; the background worker thread called `log.info(...)` before any try/except, silently killing the thread before `_update` could run. Fixed: `import logging` + `log = logging.getLogger("RevEngine.Models")` added. Models now load and render.
+- **Cinematix tab:** `Path("Disk2")` was a relative path resolved from CWD, not the game directory. Replaced with `game_dir / "Disk2"` plus additional search paths (`Movies`, `Cinematix`, `Video`).
+- **World Map tab:** `_all_automap_dirs` / `_get_unextracted_modules` don't exist in `parsers.py` (no underscore prefix). Fixed to aliased imports.
+
+**Sounds tab — complete rewrite**
+- **Root cause:** `_load_all` called `snd_dir.iterdir()` which yields the `effects/` directory object itself — all 1,057 WAV files inside it were silently skipped.
+- **Fix:** explicit `eff_dir.glob("*.wav")` after resolving `Sound/effects/`.
+- **Categorisation:** 90+ prefix → category mappings covering Player (Locke), named NPCs (Bayne, Morganna, …), human enemies, undead, beasts, bosses, magic/spells, combat SFX, environment, doors/containers, items, and UI. Longest-prefix-first matching ensures specificity.
+- **UI:** Category combobox dropdown filter; text filter box; sounds sorted by (category, filename); status bar shows file count and category count.
+
+**Blender detection**
+- `_detect_blender()` now scans `C:\Program Files\Blender Foundation\Blender*\blender.exe` when `blender` is not on `PATH` (the Windows installer does not add it). Picks highest-version install. Confirmed working with Blender 5.1.
+
+**glTF / GLB texture export — three-path fix**
+- **Godot exporter** (`core/godot_exporter.py`): was passing `[]` as the textures argument to `export_gltf`. Now calls `decode_i3d_textures(i3d_path)` and passes the result.
+- **Models tab Export glTF** (`ui/tabs/models.py`): was reading `_viewer._textures` which could be stale if texture load failed at model-select time. Now decodes textures fresh from `geom.path` at export time. Also saves a `_diffuse.png` sidecar alongside every `.gltf` for manual use in Blender.
+- **Modernize pipeline** (`asset_studio_modernize.py` + `tools/modernize_pipeline.py`): Blender headless cannot reliably unpack data-URI textures from an imported glTF during GLB re-export. Fix: always extract the decoded texture to a real PNG file (`_diffuse_raw.png`) and pass it to Blender via `--upscaled-tex`. `_swap_texture` in the Blender script now also builds a full Principled BSDF node tree from scratch if the glTF import created no Image Texture node.
 
 ### 2026-05-09 — Bug fixes
 
@@ -241,6 +264,9 @@ The output file is **self-contained** (all geometry, textures, and animation dat
 1. File → Import → glTF 2.0
 2. Select the exported `.gltf`
 3. All animation states appear in the Action Editor / NLA Editor
+4. Press **Z → Material Preview** (or the sphere icon top-right of the 3D viewport) to see the texture — Blender's default Solid mode hides materials
+
+A `_diffuse.png` sidecar is saved alongside every `.gltf` export in case you need to manually assign the texture in the Shader Editor.
 
 **Export times** (approximate, i7-class CPU):
 
