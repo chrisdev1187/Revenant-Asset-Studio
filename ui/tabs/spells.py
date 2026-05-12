@@ -328,8 +328,3 @@ def _spell_anim_model(cfg, anim_name: str) -> Optional[Path]:
         if anim_lower in f.stem.lower():
             return f
     return None
-
-
-# ═══════════════════════════════════════════════════════════════════════════════
-#  SCRIPTS TAB
-# ═══════════════════════════════════════════════════════════════════════════════

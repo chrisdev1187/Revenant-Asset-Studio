@@ -450,8 +450,3 @@ class CharacterGalleryTab(tk.Frame):
             except Exception:
                 skip += 1
         self._status.set(f"Characters exported: {ok} portraits → {dest}")
-
-
-# ═══════════════════════════════════════════════════════════════════════════════
-#  EQUIPMENT TAB
-# ═══════════════════════════════════════════════════════════════════════════════

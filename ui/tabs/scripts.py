@@ -238,8 +238,3 @@ class ScriptsTab(tk.Frame):
             except Exception:
                 skip += 1
         self._status.set(f"Scripts exported: {ok} files → {dest}")
-
-
-# ═══════════════════════════════════════════════════════════════════════════════
-#  3D WIREFRAME VIEWER WIDGET
-# ═══════════════════════════════════════════════════════════════════════════════

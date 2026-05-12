@@ -88,11 +88,6 @@ def apply_global_styles(root: tk.Tk):
                     fieldbackground=THEME["bg_panel"],
                     arrowcolor=THEME["accent"])
 
-    # Buttons (Custom variant can be added if needed, though we often use tk.Button for more control)
-    style.configure("TButton",
-                    font=FONTS["small_bold"],
-                    padding=6)
-
     # Frame
     style.configure("TFrame", background=THEME["bg_mid"])
 
@@ -105,7 +100,5 @@ def enable_high_dpi(root: tk.Tk):
         from ctypes import windll
         windll.shcore.SetProcessDpiAwareness(1)
     except Exception:
-        pass # Non-Windows or older Windows
-
-    # Base scaling adjustment if needed
+        pass
     root.tk.call('tk', 'scaling', 1.5)

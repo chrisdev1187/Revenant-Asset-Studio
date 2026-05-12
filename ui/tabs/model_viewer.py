@@ -455,8 +455,3 @@ class ModelViewer3D(tk.Frame):
         self._photo_ref = photo
         c.delete("all")
         c.create_image(0, 0, anchor="nw", image=photo)
-
-
-# ═══════════════════════════════════════════════════════════════════════════════
-#  3D MODELS TAB
-# ═══════════════════════════════════════════════════════════════════════════════

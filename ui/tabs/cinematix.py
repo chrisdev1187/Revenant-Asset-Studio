@@ -125,34 +125,3 @@ class CinematiXTab(tk.Frame):
                 subprocess.Popen(["xdg-open", str(p)])
         except Exception as e:
             self._status.set(f"Could not open video: {e}")
-
-
-# ═══════════════════════════════════════════════════════════════════════════════
-#  UI Resources CATEGORIES
-# ═══════════════════════════════════════════════════════════════════════════════
-
-_UI_CATEGORIES: Dict[str, List[str]] = {
-    "Menus":        ["splash", "menus", "selstarttex", "selstartnotex",
-                     "ingamemenutex", "ingamemenunotex", "death", "credits",
-                     "demo", "exit"],
-    "Save / Load":  ["loadgametex", "loadgamenotex", "loadgamealpha", "loadbar",
-                     "savegametex", "savegamenotex", "savegamealpha",
-                     "userinfonotex", "userinfotex"],
-    "Character":    ["createchartex", "createcharnotex", "createcharalpha"],
-    "HUD":          ["bottombar", "health", "stamina", "startbar",
-                     "statusbar", "statusbarnotex", "sidepane",
-                     "sidebartabs", "sidebartabsnotex"],
-    "Inventory":    ["inventory", "equippane", "equipscr", "intrface",
-                     "book", "buysell", "gamedata", "scroll", "spellscroll",
-                     "spellpane", "spellicons", "automap"],
-    "Dialog":       ["dialog", "dlg", "dlgfont", "dlgfonts"],
-    "Fonts":        ["gamefont", "sysfont", "scrlfont", "smlfont", "gnrmfont"],
-    "Multiplayer":  ["hostgame", "joingame", "connect", "mpingame",
-                     "mpingamenotex", "mpingametex"],
-    "Gold / Items": ["medgold", "medgoldg", "medgoldglow", "medgolds",
-                     "medgoldsel", "medgoldshad", "medgoldsilv",
-                     "smallgold", "smallgoldg", "smallgoldglow", "smallgolds",
-                     "smallgoldsel", "smallgoldshad", "smallgoldsilv"],
-    "Widgets":      ["widgetstex", "widgetsnotex", "widgetsalpha", "imagery"],
-    "Editor (GCK)": ["editor"],
-}

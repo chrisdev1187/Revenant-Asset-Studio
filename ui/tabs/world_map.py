@@ -425,8 +425,3 @@ class WorldMapTab(tk.Frame):
         self._canvas.delete("all")
         self._canvas.create_image(0, 0, anchor="nw", image=self._photo)
         self._canvas.configure(scrollregion=(0, 0, w, h))
-
-
-# ═══════════════════════════════════════════════════════════════════════════════
-#  CHARACTER GALLERY TAB
-# ═══════════════════════════════════════════════════════════════════════════════

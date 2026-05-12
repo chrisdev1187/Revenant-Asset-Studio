@@ -345,6 +345,3 @@ class AssetStudio(tk.Tk):
             tk.Label(win, text=desc, bg=BG_DARK, fg=FG_TEXT,
                      font=("Segoe UI", 10), anchor="w").grid(
                 row=r, column=1, sticky="w", padx=(0, 20))
-
-
-# ═══════════════════════════════════════════════════════════════════════════════

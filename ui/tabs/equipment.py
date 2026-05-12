@@ -347,8 +347,3 @@ class EquipmentTab(tk.Frame):
                     continue
             skip += 1
         self._status.set(f"{folder} icons exported: {ok} saved, {skip} skipped → {dest}")
-
-
-# ═══════════════════════════════════════════════════════════════════════════════
-#  SPELLS TAB  (reworked: icons + talisman combos + variants)
-# ═══════════════════════════════════════════════════════════════════════════════

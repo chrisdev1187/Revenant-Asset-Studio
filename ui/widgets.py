@@ -1,6 +1,8 @@
+from __future__ import annotations
 import tkinter as tk
 from tkinter import ttk
 from core.constants import *
+
 #  REUSABLE WIDGETS
 # ═══════════════════════════════════════════════════════════════════════════════
 
@@ -119,22 +121,15 @@ class StatusBar(tk.Frame):
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
-#  WORLD MAP TAB
+#  ZONE NAMES
 # ═══════════════════════════════════════════════════════════════════════════════
 
-# Zone → name mapping based on diagnostic scan of actual tile data.
-# Zones confirmed present: 0,2-5,30-32,36-37,39,41,44-46,48-49,51-58,73,83,100-102,205
-# Zones 6-29 (except present ones) and gaps are simply absent from game data.
-# Town/OrcCamp interiors have NO automap tiles (too small; developers didn't generate them).
 ZONE_NAMES = {
-    # ── Ahkuilon outdoor world ────────────────────────────────────────────────
     0:   "Main World (Ahkuilon)",
-    # ── Interior zones (confirmed tile data) ─────────────────────────────────
     2:   "Zone 2",
     3:   "Zone 3",
     4:   "Zone 4",
     5:   "Zone 5",
-    # ── Dungeon / Keep zones (30-58 range) ───────────────────────────────────
     30:  "Zone 30",
     31:  "Zone 31",
     32:  "Zone 32",
@@ -155,7 +150,6 @@ ZONE_NAMES = {
     56:  "Zone 56",
     57:  "Zone 57",
     58:  "Zone 58",
-    # ── Large zones ───────────────────────────────────────────────────────────
     73:  "Zone 73",
     83:  "Zone 83",
     100: "Zone 100",
@@ -163,10 +157,3 @@ ZONE_NAMES = {
     102: "Zone 102",
     205: "Zone 205",
 }
-
-
-
-
-# ═══════════════════════════════════════════════════════════════════════════════
-#  WORLD MAP TAB
-# ═══════════════════════════════════════════════════════════════════════════════
