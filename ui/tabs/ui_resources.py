@@ -1,9 +1,11 @@
 from PIL import Image
+import re
 import tkinter as tk
 from tkinter import ttk, filedialog, messagebox
 import threading
 from pathlib import Path
 from typing import List, Dict, Optional, Tuple
+from ui.theme import THEME, FONTS
 from core.constants import *
 from ui.widgets import *
 from core.parsers import *
@@ -14,7 +16,7 @@ class UIResourcesTab(tk.Frame):
 
     def __init__(self, parent, config, status: StatusBar):
         self.cfg = config
-        super().__init__(parent, bg=BG_MID)
+        super().__init__(parent, bg=THEME["bg_mid"])
         self._status      = status
         self._dat_files   : Dict[str, Path] = {}
         self._raw_imgs    : List[Optional["Image.Image"]] = []
@@ -33,12 +35,12 @@ class UIResourcesTab(tk.Frame):
 
     def _build_ui(self):
         # Top toolbar
-        bar = tk.Frame(self, bg=BG_DARK, pady=4)
+        bar = tk.Frame(self, bg=THEME["bg_dark"], pady=4)
         bar.pack(fill="x")
-        tk.Label(bar, text="UI Resources", bg=BG_DARK, fg=ACCENT,
-                 font=("Segoe UI", 11, "bold")).pack(side="left", padx=10)
-        self._count_lbl = tk.Label(bar, text="", bg=BG_DARK, fg=FG_DIM,
-                                   font=("Segoe UI", 9))
+        tk.Label(bar, text="UI Resources", bg=THEME["bg_dark"], fg=THEME["accent"],
+                 font=FONTS["header"]).pack(side="left", padx=10)
+        self._count_lbl = tk.Label(bar, text="", bg=THEME["bg_dark"], fg=THEME["fg_dim"],
+                                   font=FONTS["small"])
         self._count_lbl.pack(side="left", padx=6)
         tk.Button(bar, text="Export All UI", bg=ACCENT3, fg="#000",
                   relief="flat", font=("Segoe UI", 9, "bold"), padx=8,
@@ -48,14 +50,14 @@ class UIResourcesTab(tk.Frame):
                   command=self._export_file).pack(side="right", padx=4)
 
         # Horizontal split: tree | content
-        pane = tk.PanedWindow(self, orient="horizontal", bg=BG_DARK,
+        pane = tk.PanedWindow(self, orient="horizontal", bg=THEME["bg_dark"],
                               sashwidth=4, sashpad=0)
         pane.pack(fill="both", expand=True)
 
         # ── Left: category tree ──────────────────────────────────────────────
-        left = tk.Frame(pane, bg=BG_PANEL, width=220)
+        left = tk.Frame(pane, bg=THEME["bg_panel"], width=220)
         pane.add(left, minsize=160)
-        tk.Label(left, text="Files", bg=BG_PANEL, fg=FG_DIM,
+        tk.Label(left, text="Files", bg=THEME["bg_panel"], fg=THEME["fg_dim"],
                  font=("Segoe UI", 9, "bold")).pack(anchor="w", padx=8, pady=(4, 0))
         sb_tv = ttk.Scrollbar(left, orient="vertical")
         sb_tv.pack(side="right", fill="y")
@@ -66,38 +68,38 @@ class UIResourcesTab(tk.Frame):
         self._tv.bind("<<TreeviewSelect>>", self._on_select)
 
         # ── Right: vertical split — preview top, tile grid bottom ────────────
-        right = tk.Frame(pane, bg=BG_DARK)
+        right = tk.Frame(pane, bg=THEME["bg_dark"])
         pane.add(right, minsize=500)
 
-        v_pane = tk.PanedWindow(right, orient="vertical", bg=BG_DARK,
+        v_pane = tk.PanedWindow(right, orient="vertical", bg=THEME["bg_dark"],
                                 sashwidth=5)
         v_pane.pack(fill="both", expand=True)
 
         # ─ Preview panel ─────────────────────────────────────────────────────
-        preview_outer = tk.Frame(v_pane, bg=BG_DARK)
+        preview_outer = tk.Frame(v_pane, bg=THEME["bg_dark"])
         v_pane.add(preview_outer, minsize=180)
 
         # Info + animate controls on one bar above the canvas
-        pbar = tk.Frame(preview_outer, bg=BG_MID, pady=3)
+        pbar = tk.Frame(preview_outer, bg=THEME["bg_mid"], pady=3)
         pbar.pack(fill="x")
-        self._file_lbl = tk.Label(pbar, text="Select a file", bg=BG_MID,
-                                  fg=ACCENT, font=("Segoe UI", 10, "bold"))
+        self._file_lbl = tk.Label(pbar, text="Select a file", bg=THEME["bg_mid"],
+                                  fg=THEME["accent"], font=("Segoe UI", 10, "bold"))
         self._file_lbl.pack(side="left", padx=10)
-        self._info_lbl = tk.Label(pbar, text="", bg=BG_MID, fg=FG_DIM,
-                                  font=("Segoe UI", 9))
+        self._info_lbl = tk.Label(pbar, text="", bg=THEME["bg_mid"], fg=THEME["fg_dim"],
+                                  font=FONTS["small"])
         self._info_lbl.pack(side="left", padx=6)
 
         self._fps_var = tk.IntVar(value=8)
-        self._play_btn = tk.Button(pbar, text="▶ Animate", bg=BG_MID,
-                                   fg=FG_TEXT, relief="flat",
+        self._play_btn = tk.Button(pbar, text="▶ Animate", bg=THEME["bg_mid"],
+                                   fg=THEME["fg_text"], relief="flat",
                                    font=("Segoe UI", 8), padx=6,
                                    command=self._toggle_play)
         self._play_btn.pack(side="right", padx=4)
         tk.Spinbox(pbar, from_=1, to=30, textvariable=self._fps_var,
-                   bg=BG_PANEL, fg=FG_TEXT, buttonbackground=BG_MID,
+                   bg=THEME["bg_panel"], fg=THEME["fg_text"], buttonbackground=BG_MID,
                    relief="flat", width=3,
                    font=("Segoe UI", 8)).pack(side="right", padx=(0, 2))
-        tk.Label(pbar, text="fps", bg=BG_MID, fg=FG_DIM,
+        tk.Label(pbar, text="fps", bg=THEME["bg_mid"], fg=THEME["fg_dim"],
                  font=("Segoe UI", 8)).pack(side="right")
 
         # Large preview canvas (background / selected element)
@@ -107,15 +109,15 @@ class UIResourcesTab(tk.Frame):
         self._preview_canvas.bind("<Configure>", lambda e: self._draw_preview())
 
         # ─ Tile grid ─────────────────────────────────────────────────────────
-        grid_outer = tk.Frame(v_pane, bg=BG_DARK)
+        grid_outer = tk.Frame(v_pane, bg=THEME["bg_dark"])
         v_pane.add(grid_outer, minsize=120)
 
-        gbar = tk.Frame(grid_outer, bg=BG_MID, pady=2)
+        gbar = tk.Frame(grid_outer, bg=THEME["bg_mid"], pady=2)
         gbar.pack(fill="x")
-        self._grid_lbl = tk.Label(gbar, text="Elements", bg=BG_MID,
-                                  fg=ACCENT2, font=("Segoe UI", 9, "bold"))
+        self._grid_lbl = tk.Label(gbar, text="Elements", bg=THEME["bg_mid"],
+                                  fg=THEME["accent_light"], font=("Segoe UI", 9, "bold"))
         self._grid_lbl.pack(side="left", padx=10)
-        self._frame_nav = tk.Label(gbar, text="", bg=BG_MID, fg=FG_DIM,
+        self._frame_nav = tk.Label(gbar, text="", bg=THEME["bg_mid"], fg=THEME["fg_dim"],
                                    font=("Segoe UI", 8))
         self._frame_nav.pack(side="left", padx=6)
 
@@ -123,14 +125,14 @@ class UIResourcesTab(tk.Frame):
         h_sb.pack(side="bottom", fill="x")
         v_sb = ttk.Scrollbar(grid_outer, orient="vertical")
         v_sb.pack(side="right", fill="y")
-        self._grid_canvas = tk.Canvas(grid_outer, bg=BG_DARK, bd=0,
+        self._grid_canvas = tk.Canvas(grid_outer, bg=THEME["bg_dark"], bd=0,
                                       highlightthickness=0,
                                       xscrollcommand=h_sb.set,
                                       yscrollcommand=v_sb.set)
         self._grid_canvas.pack(fill="both", expand=True)
         h_sb.config(command=self._grid_canvas.xview)
         v_sb.config(command=self._grid_canvas.yview)
-        self._grid_inner = tk.Frame(self._grid_canvas, bg=BG_DARK)
+        self._grid_inner = tk.Frame(self._grid_canvas, bg=THEME["bg_dark"])
         self._grid_win = self._grid_canvas.create_window(
             (0, 0), window=self._grid_inner, anchor="nw")
         self._grid_inner.bind("<Configure>", lambda e:
@@ -180,7 +182,7 @@ class UIResourcesTab(tk.Frame):
         self._tv.tag_configure("cat",  foreground=ACCENT2,
                                font=("Segoe UI", 9, "bold"))
         self._tv.tag_configure("file", foreground=FG_TEXT,
-                               font=("Segoe UI", 9))
+                               font=FONTS["small"])
         self._count_lbl.config(text=f"{total} .dat files")
 
     # ── Selection / display ───────────────────────────────────────────────────
@@ -217,7 +219,7 @@ class UIResourcesTab(tk.Frame):
 
         # Decode all frames using fast BGR555 path
         for i in range(n):
-            img = _decode_dat_frame(path, i)
+            img = decode_dat_frame(path, i)
             # If standard decoder got it, convert pixels via fast path for large images
             self._raw_imgs.append(img)
 
@@ -300,7 +302,7 @@ class UIResourcesTab(tk.Frame):
 
             tk.Label(cell, image=ph, bg=BG_CARD,
                      width=40, height=40).pack()
-            tk.Label(cell, text=f"'{char}'", bg=BG_CARD, fg=ACCENT2,
+            tk.Label(cell, text=f"'{char}'", bg=BG_CARD, fg=THEME["accent_light"],
                      font=("Consolas", 7)).pack()
             cell._ph = ph
 
@@ -327,7 +329,7 @@ class UIResourcesTab(tk.Frame):
             cw, ch = max(1, c.winfo_width()), max(1, c.winfo_height())
             c.create_text(cw // 2, ch // 2,
                           text="(metadata frame — no image)",
-                          fill=FG_MUTED, font=("Segoe UI", 10))
+                          fill=FG_MUTED, font=FONTS["body"])
             return
         cw = max(1, c.winfo_width())
         ch = max(1, c.winfo_height())
@@ -453,7 +455,7 @@ _CUBE_RE   = re.compile(
 _OBJECT_RE = re.compile(r'OBJECT\s+"([^"]+)"', re.IGNORECASE)
 
 
-def _parse_script_objects(text: str) -> List[Dict]:
+def parse_script_objects(text: str) -> List[Dict]:
     objects: List[Dict] = []
     current = None
     for line in text.splitlines():

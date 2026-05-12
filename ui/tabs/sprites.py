@@ -1,9 +1,11 @@
 from PIL import Image, ImageTk
+import re
 import tkinter as tk
 from tkinter import ttk, filedialog, messagebox
 import threading
 from pathlib import Path
 from typing import List, Dict, Optional, Tuple
+from ui.theme import THEME, FONTS
 from core.constants import *
 from ui.widgets import *
 from core.parsers import *
@@ -12,7 +14,7 @@ class SpritesTab(tk.Frame):
 
     def __init__(self, parent, config, status: StatusBar):
         self.cfg = config
-        super().__init__(parent, bg=BG_MID)
+        super().__init__(parent, bg=THEME["bg_mid"])
         self._status      = status
         from ui.tabs.models import _get_sprite_categories
         self._cats        = _get_sprite_categories(self.cfg)
@@ -30,21 +32,21 @@ class SpritesTab(tk.Frame):
     # ── UI construction ──────────────────────────────────────────────────────
     def _build_ui(self):
         # Top toolbar
-        bar = tk.Frame(self, bg=BG_DARK, pady=4)
+        bar = tk.Frame(self, bg=THEME["bg_dark"], pady=4)
         bar.pack(fill="x")
-        tk.Label(bar, text="Category:", bg=BG_DARK, fg=FG_DIM,
-                 font=("Segoe UI", 10)).pack(side="left", padx=(12, 4))
+        tk.Label(bar, text="Category:", bg=THEME["bg_dark"], fg=THEME["fg_dim"],
+                 font=FONTS["body"]).pack(side="left", padx=(12, 4))
         self._cat_cb = ttk.Combobox(bar, textvariable=self._cat,
                                     values=self._cats, state="readonly", width=14)
         self._cat_cb.pack(side="left", padx=(0, 10))
         self._cat_cb.bind("<<ComboboxSelected>>", self._on_cat_change)
 
-        self._count_lbl = tk.Label(bar, text="", bg=BG_DARK, fg=FG_DIM,
-                                    font=("Segoe UI", 9))
+        self._count_lbl = tk.Label(bar, text="", bg=THEME["bg_dark"], fg=THEME["fg_dim"],
+                                    font=FONTS["small"])
         self._count_lbl.pack(side="left", padx=10)
 
         # Right-side buttons
-        tk.Button(bar, text="Save PNG", bg=BG_PANEL, fg=FG_TEXT,
+        tk.Button(bar, text="Save PNG", bg=THEME["bg_panel"], fg=THEME["fg_text"],
                   relief="flat", padx=8,
                   command=self._save_full_png).pack(side="right", padx=4)
         self._export_btn = tk.Button(bar, text="Export All", bg=ACCENT2,
@@ -53,15 +55,15 @@ class SpritesTab(tk.Frame):
         self._export_btn.pack(side="right", padx=4)
 
         # Main split: grid left | detail right
-        paned = tk.PanedWindow(self, orient="horizontal", bg=BG_DARK,
+        paned = tk.PanedWindow(self, orient="horizontal", bg=THEME["bg_dark"],
                                sashwidth=4, sashrelief="flat")
         paned.pack(fill="both", expand=True)
 
         # ── Left: scrollable thumbnail grid ──────────────────────────────────
-        left = tk.Frame(paned, bg=BG_MID)
+        left = tk.Frame(paned, bg=THEME["bg_mid"])
         paned.add(left, minsize=200)
 
-        self._canvas = tk.Canvas(left, bg=BG_MID, highlightthickness=0)
+        self._canvas = tk.Canvas(left, bg=THEME["bg_mid"], highlightthickness=0)
         vsb = ttk.Scrollbar(left, orient="vertical", command=self._canvas.yview)
         self._canvas.configure(yscrollcommand=vsb.set)
         vsb.pack(side="right", fill="y")
@@ -71,7 +73,7 @@ class SpritesTab(tk.Frame):
             -1 if e.delta > 0 else 1, "units"))
 
         # inner frame inside canvas for the grid
-        self._inner = tk.Frame(self._canvas, bg=BG_MID)
+        self._inner = tk.Frame(self._canvas, bg=THEME["bg_mid"])
         self._win_id = self._canvas.create_window((0, 0), window=self._inner,
                                                    anchor="nw")
         self._inner.bind("<Configure>",
@@ -79,23 +81,23 @@ class SpritesTab(tk.Frame):
                              scrollregion=self._canvas.bbox("all")))
 
         # ── Right: detail panel ───────────────────────────────────────────────
-        right = tk.Frame(paned, bg=BG_PANEL, width=340)
+        right = tk.Frame(paned, bg=THEME["bg_panel"], width=340)
         paned.add(right, minsize=240)
 
-        tk.Label(right, textvariable=self._sel_name, bg=BG_PANEL, fg=ACCENT2,
-                 font=("Segoe UI", 11, "bold"), anchor="center").pack(
+        tk.Label(right, textvariable=self._sel_name, bg=THEME["bg_panel"], fg=THEME["accent_light"],
+                 font=FONTS["header"], anchor="center").pack(
                      fill="x", pady=(10, 4))
 
-        self._dim_lbl = tk.Label(right, text="", bg=BG_PANEL, fg=FG_DIM,
-                                  font=("Segoe UI", 9))
+        self._dim_lbl = tk.Label(right, text="", bg=THEME["bg_panel"], fg=THEME["fg_dim"],
+                                  font=FONTS["small"])
         self._dim_lbl.pack(fill="x", padx=10)
 
         # Image canvas for the decoded sprite
-        self._detail_canvas = tk.Canvas(right, bg=BG_MID, highlightthickness=1,
+        self._detail_canvas = tk.Canvas(right, bg=THEME["bg_mid"], highlightthickness=1,
                                          highlightbackground=BG_DARK)
         self._detail_canvas.pack(fill="both", expand=True, padx=10, pady=10)
 
-        self._decode_lbl = tk.Label(right, text="", bg=BG_PANEL, fg=FG_DIM,
+        self._decode_lbl = tk.Label(right, text="", bg=THEME["bg_panel"], fg=THEME["fg_dim"],
                                      font=("Segoe UI", 8))
         self._decode_lbl.pack(pady=(0, 6))
 
@@ -149,28 +151,28 @@ class SpritesTab(tk.Frame):
         for idx, (tn_path, i2d_path) in enumerate(self._tn_items):
             row = idx // ncols
             col = idx % ncols
-            cell = tk.Frame(self._inner, bg=BG_MID,
+            cell = tk.Frame(self._inner, bg=THEME["bg_mid"],
                             width=CELL_W, height=CELL_H)
             cell.grid_propagate(False)
             cell.grid(row=row, column=col, padx=2, pady=2)
 
             # Thumbnail image
-            img = _load_tn_image(tn_path, THUMB_SIZE)
+            img = load_tn_image(tn_path, THUMB_SIZE)
             if img and HAS_PIL:
                 ph = ImageTk.PhotoImage(img)
                 self._ph_cache[str(tn_path)] = ph
-                lbl = tk.Label(cell, image=ph, bg=BG_MID, cursor="hand2")
+                lbl = tk.Label(cell, image=ph, bg=THEME["bg_mid"], cursor="hand2")
                 lbl._photo = ph
                 lbl.pack(pady=(3, 0))
             else:
                 ph = None
-                lbl = tk.Label(cell, text="?", bg=BG_MID, fg=FG_DIM,
+                lbl = tk.Label(cell, text="?", bg=THEME["bg_mid"], fg=THEME["fg_dim"],
                                width=4, height=3)
                 lbl.pack(pady=(3, 0))
 
             # Name label (truncated)
             name = tn_path.stem[:11]
-            tk.Label(cell, text=name, bg=BG_MID, fg=FG_TEXT,
+            tk.Label(cell, text=name, bg=THEME["bg_mid"], fg=THEME["fg_text"],
                      font=("Segoe UI", 7), anchor="center").pack()
 
             # Bind click
@@ -200,7 +202,7 @@ class SpritesTab(tk.Frame):
                     pass
             # Fallback: scale up the .tn thumbnail
             if img is None:
-                img = _load_tn_image(tn_path, 128)
+                img = load_tn_image(tn_path, 128)
                 label_txt = f"Preview: {tn_path.name}  (no i2d decode)"
             else:
                 label_txt = f"{img.width}×{img.height}px  |  {i2d_path.name}"
@@ -273,7 +275,7 @@ class SpritesTab(tk.Frame):
                         pass
                 # Fallback: scale up the .tn thumbnail (48×48)
                 if img is None:
-                    img = _load_tn_image(tn_path, 64)
+                    img = load_tn_image(tn_path, 64)
                 if img:
                     try:
                         img.save(str(out))

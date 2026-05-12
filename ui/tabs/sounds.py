@@ -1,8 +1,10 @@
 import tkinter as tk
+import re
 from tkinter import ttk, filedialog, messagebox
 import threading
 from pathlib import Path
 from typing import List, Dict, Optional, Tuple
+from ui.theme import THEME, FONTS
 from core.constants import *
 from ui.widgets import *
 from core.parsers import *
@@ -11,7 +13,7 @@ class SoundsTab(tk.Frame):
 
     def __init__(self, parent, config, status: StatusBar):
         self.cfg = config
-        super().__init__(parent, bg=BG_MID)
+        super().__init__(parent, bg=THEME["bg_mid"])
         self._status       = status
         self._sounds: List[Dict] = []
         self._current_proc = None
@@ -19,15 +21,15 @@ class SoundsTab(tk.Frame):
         self.after(600, self._load_all)
 
     def _build_ui(self):
-        bar = tk.Frame(self, bg=BG_DARK, pady=4)
+        bar = tk.Frame(self, bg=THEME["bg_dark"], pady=4)
         bar.pack(fill="x")
 
-        tk.Label(bar, text="Filter:", bg=BG_DARK, fg=FG_DIM,
-                 font=("Segoe UI", 10)).pack(side="left", padx=(10, 4))
+        tk.Label(bar, text="Filter:", bg=THEME["bg_dark"], fg=THEME["fg_dim"],
+                 font=FONTS["body"]).pack(side="left", padx=(10, 4))
         self._flt_var = tk.StringVar()
         tk.Entry(bar, textvariable=self._flt_var,
-                 bg=BG_PANEL, fg=FG_TEXT, insertbackground=FG_TEXT,
-                 font=("Segoe UI", 10), relief="flat", width=28
+                 bg=THEME["bg_panel"], fg=THEME["fg_text"], insertbackground=FG_TEXT,
+                 font=FONTS["body"], relief="flat", width=28
                  ).pack(side="left", padx=4)
         self._flt_var.trace_add("write", self._filter)
 
@@ -38,15 +40,15 @@ class SoundsTab(tk.Frame):
                   font=("Segoe UI", 10, "bold"), padx=10,
                   command=self._stop).pack(side="left", padx=2)
 
-        self._count_lbl = tk.Label(bar, text="", bg=BG_DARK, fg=FG_DIM,
-                                   font=("Segoe UI", 9))
+        self._count_lbl = tk.Label(bar, text="", bg=THEME["bg_dark"], fg=THEME["fg_dim"],
+                                   font=FONTS["small"])
         self._count_lbl.pack(side="right", padx=12)
 
-        pane = tk.PanedWindow(self, orient="horizontal", bg=BG_DARK,
+        pane = tk.PanedWindow(self, orient="horizontal", bg=THEME["bg_dark"],
                               sashwidth=6, sashrelief="flat")
         pane.pack(fill="both", expand=True)
 
-        tv_f = tk.Frame(pane, bg=BG_MID)
+        tv_f = tk.Frame(pane, bg=THEME["bg_mid"])
         pane.add(tv_f, minsize=560)
         cols = ("name", "cat", "size")
         self._tv = ttk.Treeview(tv_f, columns=cols, show="headings",
@@ -64,14 +66,14 @@ class SoundsTab(tk.Frame):
         self._tv.bind("<Double-Button-1>", lambda e: self._play_selected())
 
         # Detail panel
-        det = tk.Frame(pane, bg=BG_PANEL, padx=12, pady=12)
+        det = tk.Frame(pane, bg=THEME["bg_panel"], padx=12, pady=12)
         pane.add(det, minsize=200)
-        tk.Label(det, text="SOUND DETAILS", bg=BG_PANEL, fg=ACCENT2,
-                 font=("Segoe UI", 11, "bold")).pack(anchor="w")
+        tk.Label(det, text="SOUND DETAILS", bg=THEME["bg_panel"], fg=THEME["accent_light"],
+                 font=FONTS["header"]).pack(anchor="w")
         ttk.Separator(det).pack(fill="x", pady=6)
         self._det_lbl = tk.Label(det, text="Select a file to preview",
-                                 bg=BG_PANEL, fg=FG_DIM,
-                                 font=("Segoe UI", 9), wraplength=180,
+                                 bg=THEME["bg_panel"], fg=THEME["fg_dim"],
+                                 font=FONTS["small"], wraplength=180,
                                  justify="left", anchor="w")
         self._det_lbl.pack(anchor="w")
 

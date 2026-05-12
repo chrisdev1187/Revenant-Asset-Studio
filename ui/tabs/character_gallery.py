@@ -1,9 +1,12 @@
 from PIL import Image, ImageTk
+import os
+import re
 import tkinter as tk
 from tkinter import ttk, filedialog, messagebox
 import threading
 from pathlib import Path
 from typing import List, Dict, Optional, Tuple
+from ui.theme import THEME, FONTS
 from core.constants import *
 from ui.widgets import *
 from core.parsers import *
@@ -23,11 +26,11 @@ class CharCard(tk.Frame):
             lbl = tk.Label(img_frame, image=photo, bg=BG_CARD)
             lbl.pack()
         else:
-            tk.Label(img_frame, text="?", bg=BG_MID, fg=FG_DIM,
+            tk.Label(img_frame, text="?", bg=THEME["bg_mid"], fg=THEME["fg_dim"],
                      width=8, height=4, font=("Segoe UI", 18)).pack()
 
         # Name
-        tk.Label(self, text=char["name"], bg=BG_CARD, fg=FG_TEXT,
+        tk.Label(self, text=char["name"], bg=BG_CARD, fg=THEME["fg_text"],
                  font=("Segoe UI", 9, "bold"), wraplength=110,
                  justify="center").pack(pady=(0, 2))
 
@@ -35,11 +38,11 @@ class CharCard(tk.Frame):
         cls  = char.get("class", "") or "—"
         atks = char.get("attack_count", 0)
         grp  = (char.get("groups", "") or "—").split(",")[0]
-        tk.Label(self, text=f"Class: {cls}", bg=BG_CARD, fg=ACCENT2,
+        tk.Label(self, text=f"Class: {cls}", bg=BG_CARD, fg=THEME["accent_light"],
                  font=("Segoe UI", 8)).pack()
-        tk.Label(self, text=f"Group: {grp}", bg=BG_CARD, fg=FG_DIM,
+        tk.Label(self, text=f"Group: {grp}", bg=BG_CARD, fg=THEME["fg_dim"],
                  font=("Segoe UI", 8)).pack()
-        tk.Label(self, text=f"Attacks: {atks}", bg=BG_CARD, fg=ACCENT3,
+        tk.Label(self, text=f"Attacks: {atks}", bg=BG_CARD, fg=THEME["success"],
                  font=("Segoe UI", 8)).pack(pady=(0, 4))
 
         # Click binding
@@ -56,7 +59,7 @@ class CharCard(tk.Frame):
 class CharacterGalleryTab(tk.Frame):
     def __init__(self, parent, config, status: StatusBar):
         self.cfg = config
-        super().__init__(parent, bg=BG_MID)
+        super().__init__(parent, bg=THEME["bg_mid"])
         self._status  = status
         self._photos  = {}
         self._chars   = []
@@ -67,54 +70,54 @@ class CharacterGalleryTab(tk.Frame):
 
     def _build_ui(self):
         # ── Toolbar ──────────────────────────────────────────────────────────
-        bar = tk.Frame(self, bg=BG_DARK, pady=6)
+        bar = tk.Frame(self, bg=THEME["bg_dark"], pady=6)
         bar.pack(fill="x")
 
-        tk.Label(bar, text="Filter:", bg=BG_DARK, fg=FG_DIM,
-                 font=("Segoe UI", 10)).pack(side="left", padx=(10, 4))
+        tk.Label(bar, text="Filter:", bg=THEME["bg_dark"], fg=THEME["fg_dim"],
+                 font=FONTS["body"]).pack(side="left", padx=(10, 4))
         self._search = tk.Entry(bar, textvariable=self._filter,
-                                 bg=BG_PANEL, fg=FG_TEXT,
+                                 bg=THEME["bg_panel"], fg=THEME["fg_text"],
                                  insertbackground=FG_TEXT,
-                                 font=("Segoe UI", 10), relief="flat",
+                                 font=FONTS["body"], relief="flat",
                                  width=24)
         self._search.pack(side="left", padx=4)
 
         tk.Button(bar, text="Export All Portraits", bg=ACCENT2, fg="#000",
                   relief="flat", font=("Segoe UI", 9, "bold"), padx=8,
                   command=self._export_all).pack(side="right", padx=4)
-        self._count_lbl = tk.Label(bar, text="", bg=BG_DARK, fg=FG_DIM,
-                                    font=("Segoe UI", 9))
+        self._count_lbl = tk.Label(bar, text="", bg=THEME["bg_dark"], fg=THEME["fg_dim"],
+                                    font=FONTS["small"])
         self._count_lbl.pack(side="right", padx=12)
 
         # ── Panes ─────────────────────────────────────────────────────────────
-        pane = tk.PanedWindow(self, orient="horizontal", bg=BG_DARK,
+        pane = tk.PanedWindow(self, orient="horizontal", bg=THEME["bg_dark"],
                                sashrelief="flat", sashwidth=6)
         pane.pack(fill="both", expand=True)
 
         # Left: gallery grid
-        left = tk.Frame(pane, bg=BG_MID)
+        left = tk.Frame(pane, bg=THEME["bg_mid"])
         pane.add(left, minsize=400)
-        self._scroll = ScrollFrame(left, bg=BG_MID)
+        self._scroll = ScrollFrame(left, bg=THEME["bg_mid"])
         self._scroll.pack(fill="both", expand=True)
         self._grid = self._scroll.inner
 
         # Right: detail panel
-        right = tk.Frame(pane, bg=BG_PANEL, padx=12, pady=12)
+        right = tk.Frame(pane, bg=THEME["bg_panel"], padx=12, pady=12)
         pane.add(right, minsize=260)
-        tk.Label(right, text="CHARACTER DETAILS", bg=BG_PANEL, fg=ACCENT,
-                 font=("Segoe UI", 11, "bold")).pack(anchor="w")
+        tk.Label(right, text="CHARACTER DETAILS", bg=THEME["bg_panel"], fg=THEME["accent"],
+                 font=FONTS["header"]).pack(anchor="w")
         ttk.Separator(right).pack(fill="x", pady=6)
 
         self._detail_name = tk.Label(right, text="Select a character",
-                                      bg=BG_PANEL, fg=FG_TEXT,
+                                      bg=THEME["bg_panel"], fg=THEME["fg_text"],
                                       font=("Segoe UI", 14, "bold"),
                                       wraplength=240, justify="left")
         self._detail_name.pack(anchor="w", pady=(0, 4))
 
-        self._detail_portrait = tk.Label(right, bg=BG_PANEL)
+        self._detail_portrait = tk.Label(right, bg=THEME["bg_panel"])
         self._detail_portrait.pack(anchor="w", pady=4)
 
-        self._detail_text = tk.Text(right, bg=BG_PANEL, fg=FG_TEXT,
+        self._detail_text = tk.Text(right, bg=THEME["bg_panel"], fg=THEME["fg_text"],
                                      font=("Consolas", 9),
                                      relief="flat", wrap="word",
                                      state="disabled", height=32,
@@ -131,7 +134,7 @@ class CharacterGalleryTab(tk.Frame):
         self._detail_text.tag_configure("v",    foreground=FG_TEXT,
                                                  font=("Consolas", 9))
         self._detail_text.tag_configure("kv",   foreground=ACCENT2,
-                                                 font=("Segoe UI", 9))
+                                                 font=FONTS["small"])
         self._detail_text.tag_configure("dim",  foreground=FG_DIM,
                                                  font=("Segoe UI", 8))
         self._detail_text.tag_configure("link", foreground="#6ab0f5",

@@ -1,16 +1,19 @@
 from PIL import Image, ImageTk
+import os
+import re
 import tkinter as tk
 from tkinter import ttk, filedialog, messagebox
 import threading
 from pathlib import Path
 from typing import List, Dict, Optional, Tuple
+from ui.theme import THEME, FONTS
 from core.constants import *
 from ui.widgets import *
 from core.parsers import *
 class SpellsTab(tk.Frame):
     def __init__(self, parent, config, status: StatusBar):
         self.cfg = config
-        super().__init__(parent, bg=BG_MID)
+        super().__init__(parent, bg=THEME["bg_mid"])
         self._status   = status
         self._spells   = []
         self._talis_ph : Dict[str, "ImageTk.PhotoImage"] = {}
@@ -22,14 +25,14 @@ class SpellsTab(tk.Frame):
         self.after(400, self._load_all)
 
     def _build_ui(self):
-        bar = tk.Frame(self, bg=BG_DARK, pady=4)
+        bar = tk.Frame(self, bg=THEME["bg_dark"], pady=4)
         bar.pack(fill="x")
         self._flt_var = tk.StringVar()
-        tk.Label(bar, text="Filter:", bg=BG_DARK, fg=FG_DIM,
-                 font=("Segoe UI", 10)).pack(side="left", padx=(10, 4))
+        tk.Label(bar, text="Filter:", bg=THEME["bg_dark"], fg=THEME["fg_dim"],
+                 font=FONTS["body"]).pack(side="left", padx=(10, 4))
         tk.Entry(bar, textvariable=self._flt_var,
-                 bg=BG_PANEL, fg=FG_TEXT, insertbackground=FG_TEXT,
-                 font=("Segoe UI", 10), relief="flat", width=20
+                 bg=THEME["bg_panel"], fg=THEME["fg_text"], insertbackground=FG_TEXT,
+                 font=FONTS["body"], relief="flat", width=20
                  ).pack(side="left", padx=4)
         self._flt_var.trace_add("write", self._filter)
         self._export_btn = tk.Button(bar, text="Export All Icons", bg=ACCENT2,
@@ -37,16 +40,16 @@ class SpellsTab(tk.Frame):
                                      font=("Segoe UI", 9, "bold"), padx=8,
                                      command=self._export_all)
         self._export_btn.pack(side="right", padx=4)
-        self._count_lbl = tk.Label(bar, text="", bg=BG_DARK, fg=FG_DIM,
-                                   font=("Segoe UI", 9))
+        self._count_lbl = tk.Label(bar, text="", bg=THEME["bg_dark"], fg=THEME["fg_dim"],
+                                   font=FONTS["small"])
         self._count_lbl.pack(side="right", padx=12)
 
-        pane = tk.PanedWindow(self, orient="horizontal", bg=BG_DARK,
+        pane = tk.PanedWindow(self, orient="horizontal", bg=THEME["bg_dark"],
                               sashwidth=6, sashrelief="flat")
         pane.pack(fill="both", expand=True)
 
         # ── Left: compact spell list ──────────────────────────────────────────
-        lf = tk.Frame(pane, bg=BG_MID)
+        lf = tk.Frame(pane, bg=THEME["bg_mid"])
         pane.add(lf, minsize=240)
         cols = ("name", "mana", "type")
         self._tv = ttk.Treeview(lf, columns=cols, show="headings",
@@ -64,36 +67,36 @@ class SpellsTab(tk.Frame):
         self._tv.bind("<<TreeviewSelect>>", self._on_select)
 
         # ── Right: rich detail card ───────────────────────────────────────────
-        right = tk.Frame(pane, bg=BG_PANEL)
+        right = tk.Frame(pane, bg=THEME["bg_panel"])
         pane.add(right, minsize=380)
 
         # Header row: icon + slot badge + name
-        hdr = tk.Frame(right, bg=BG_PANEL, padx=10, pady=8)
+        hdr = tk.Frame(right, bg=THEME["bg_panel"], padx=10, pady=8)
         hdr.pack(fill="x")
-        self._icon_lbl = tk.Label(hdr, bg=BG_PANEL)
+        self._icon_lbl = tk.Label(hdr, bg=THEME["bg_panel"])
         self._icon_lbl.pack(side="left", padx=(0, 4))
-        self._slot_badge_lbl = tk.Label(hdr, bg=BG_PANEL)
+        self._slot_badge_lbl = tk.Label(hdr, bg=THEME["bg_panel"])
         self._slot_badge_lbl.pack(side="left", padx=(0, 10))
-        name_frame = tk.Frame(hdr, bg=BG_PANEL)
+        name_frame = tk.Frame(hdr, bg=THEME["bg_panel"])
         name_frame.pack(side="left", fill="x", expand=True)
         self._spell_name_lbl = tk.Label(name_frame, text="Select a spell",
-                                        bg=BG_PANEL, fg=FG_TEXT,
+                                        bg=THEME["bg_panel"], fg=THEME["fg_text"],
                                         font=("Segoe UI", 14, "bold"),
                                         anchor="w", wraplength=280)
         self._spell_name_lbl.pack(anchor="w")
         self._spell_desc_lbl = tk.Label(name_frame, text="",
-                                        bg=BG_PANEL, fg=FG_DIM,
-                                        font=("Segoe UI", 9), wraplength=280,
+                                        bg=THEME["bg_panel"], fg=THEME["fg_dim"],
+                                        font=FONTS["small"], wraplength=280,
                                         justify="left", anchor="w")
         self._spell_desc_lbl.pack(anchor="w", pady=(2, 0))
 
         ttk.Separator(right).pack(fill="x")
 
         # Scrollable detail body
-        scroll_frame = ScrollFrame(right, bg=BG_PANEL)
+        scroll_frame = ScrollFrame(right, bg=THEME["bg_panel"])
         scroll_frame.pack(fill="both", expand=True)
         self._body = scroll_frame.inner
-        self._body.configure(bg=BG_PANEL)
+        self._body.configure(bg=THEME["bg_panel"])
 
     def _load_all(self):
         self._status.set("Parsing spell.def…")
@@ -167,16 +170,16 @@ class SpellsTab(tk.Frame):
         self._variant_talis_widgets.clear()
 
         def _sect(txt, self=self):
-            tk.Label(self._body, text=txt, bg=BG_PANEL, fg=ACCENT,
+            tk.Label(self._body, text=txt, bg=THEME["bg_panel"], fg=THEME["accent"],
                      font=("Segoe UI", 9, "bold"), anchor="w"
                      ).pack(fill="x", padx=10, pady=(8, 2))
 
         def _row(k, v, self=self):
-            f = tk.Frame(self._body, bg=BG_PANEL)
+            f = tk.Frame(self._body, bg=THEME["bg_panel"])
             f.pack(fill="x", padx=10, pady=1)
-            tk.Label(f, text=f"{k}:", bg=BG_PANEL, fg=ACCENT2,
-                     font=("Segoe UI", 9), width=16, anchor="w").pack(side="left")
-            tk.Label(f, text=str(v), bg=BG_PANEL, fg=FG_TEXT,
+            tk.Label(f, text=f"{k}:", bg=THEME["bg_panel"], fg=THEME["accent_light"],
+                     font=FONTS["small"], width=16, anchor="w").pack(side="left")
+            tk.Label(f, text=str(v), bg=THEME["bg_panel"], fg=THEME["fg_text"],
                      font=("Consolas", 9), anchor="w").pack(side="left")
 
         # ── Stats ─────────────────────────────────────────────────────────────
@@ -188,11 +191,11 @@ class SpellsTab(tk.Frame):
         anim = s.get("animation", "")
         if anim:
             model_file = _spell_anim_model(self.cfg, anim)
-            af = tk.Frame(self._body, bg=BG_PANEL)
+            af = tk.Frame(self._body, bg=THEME["bg_panel"])
             af.pack(fill="x", padx=10, pady=1)
-            tk.Label(af, text="Animation:", bg=BG_PANEL, fg=ACCENT2,
-                     font=("Segoe UI", 9), width=16, anchor="w").pack(side="left")
-            tk.Label(af, text=anim, bg=BG_PANEL, fg=FG_TEXT,
+            tk.Label(af, text="Animation:", bg=THEME["bg_panel"], fg=THEME["accent_light"],
+                     font=FONTS["small"], width=16, anchor="w").pack(side="left")
+            tk.Label(af, text=anim, bg=THEME["bg_panel"], fg=THEME["fg_text"],
                      font=("Consolas", 9), anchor="w").pack(side="left")
             if model_file and model_file.exists():
                 def _open_model(p=model_file):
@@ -202,7 +205,7 @@ class SpellsTab(tk.Frame):
                     else:
                         subprocess.Popen(["xdg-open", str(p.parent)])
                 tk.Button(af, text=f"  {model_file.name}  ", bg=BG_CARD,
-                          fg=ACCENT2, relief="flat", cursor="hand2",
+                          fg=THEME["accent_light"], relief="flat", cursor="hand2",
                           font=("Segoe UI", 8), command=_open_model
                           ).pack(side="left", padx=6)
         else:
@@ -225,15 +228,15 @@ class SpellsTab(tk.Frame):
                 # Variant name + mana
                 hf = tk.Frame(vf, bg=BG_CARD)
                 hf.pack(fill="x", padx=6, pady=(4, 2))
-                tk.Label(hf, text=v["name"], bg=BG_CARD, fg=FG_TEXT,
+                tk.Label(hf, text=v["name"], bg=BG_CARD, fg=THEME["fg_text"],
                          font=("Segoe UI", 9, "bold")).pack(side="left")
                 if v.get("mana"):
                     tk.Label(hf, text=f"  {v['mana']} mana",
-                             bg=BG_CARD, fg=ACCENT2,
+                             bg=BG_CARD, fg=THEME["accent_light"],
                              font=("Segoe UI", 8)).pack(side="left")
                 if v.get("min_d") not in (None, "—") and v.get("max_d") not in (None, "—"):
                     tk.Label(hf, text=f"  dmg {v['min_d']}–{v['max_d']}",
-                             bg=BG_CARD, fg=GOLD,
+                             bg=BG_CARD, fg=THEME["gold"],
                              font=("Segoe UI", 8)).pack(side="left")
 
                 # Talisman icon chain
@@ -250,7 +253,7 @@ class SpellsTab(tk.Frame):
                         lbl_i.pack()
                         lbl_i._ph = ph
                         self._variant_talis_widgets.append(lbl_i)
-                    tk.Label(cell, text=tname, bg=BG_CARD, fg=FG_DIM,
+                    tk.Label(cell, text=tname, bg=BG_CARD, fg=THEME["fg_dim"],
                              font=("Segoe UI", 7)).pack()
 
                 if v.get("effect"):
@@ -258,7 +261,7 @@ class SpellsTab(tk.Frame):
                     ef.pack(fill="x", padx=6, pady=(0, 4))
                     tk.Label(ef, text="Effect:", bg=BG_CARD, fg=FG_MUTED,
                              font=("Segoe UI", 8)).pack(side="left")
-                    tk.Label(ef, text=v["effect"], bg=BG_CARD, fg=ACCENT3,
+                    tk.Label(ef, text=v["effect"], bg=BG_CARD, fg=THEME["success"],
                              font=("Consolas", 8)).pack(side="left", padx=4)
 
     # ── Batch export ──────────────────────────────────────────────────────────

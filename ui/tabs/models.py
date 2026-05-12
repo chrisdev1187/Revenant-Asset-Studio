@@ -1,30 +1,33 @@
 from PIL import Image, ImageTk
+import re
+import struct
 import tkinter as tk
 from tkinter import ttk, filedialog, messagebox
 import threading
 from pathlib import Path
 from typing import List, Dict, Optional, Tuple
+from ui.theme import THEME, FONTS
 from core.constants import *
 from ui.widgets import *
 from core.parsers import *
 class ModelsTab(tk.Frame):
     def __init__(self, parent, config, status: StatusBar):
         self.cfg = config
-        super().__init__(parent, bg=BG_MID)
+        super().__init__(parent, bg=THEME["bg_mid"])
         self._status = status
         self._models  : List[Dict] = []
         self._build_ui()
         self.after(600, self._load_all)
 
     def _build_ui(self):
-        bar = tk.Frame(self, bg=BG_DARK, pady=4)
+        bar = tk.Frame(self, bg=THEME["bg_dark"], pady=4)
         bar.pack(fill="x")
         self._flt_var = tk.StringVar()
-        tk.Label(bar, text="Filter:", bg=BG_DARK, fg=FG_DIM,
-                 font=("Segoe UI", 10)).pack(side="left", padx=(10,4))
+        tk.Label(bar, text="Filter:", bg=THEME["bg_dark"], fg=THEME["fg_dim"],
+                 font=FONTS["body"]).pack(side="left", padx=(10,4))
         tk.Entry(bar, textvariable=self._flt_var,
-                  bg=BG_PANEL, fg=FG_TEXT, insertbackground=FG_TEXT,
-                  font=("Segoe UI", 10), relief="flat", width=24
+                  bg=THEME["bg_panel"], fg=THEME["fg_text"], insertbackground=FG_TEXT,
+                  font=FONTS["body"], relief="flat", width=24
                   ).pack(side="left", padx=4)
         self._flt_var.trace_add("write", self._filter)
         self._batch_btn = tk.Button(bar, text="Batch Export OBJ", bg=ACCENT3,
@@ -32,15 +35,15 @@ class ModelsTab(tk.Frame):
                                      font=("Segoe UI", 9, "bold"), padx=8,
                                      command=self._batch_export_obj)
         self._batch_btn.pack(side="right", padx=4)
-        self._count_lbl = tk.Label(bar, text="", bg=BG_DARK, fg=FG_DIM,
-                                    font=("Segoe UI", 9))
+        self._count_lbl = tk.Label(bar, text="", bg=THEME["bg_dark"], fg=THEME["fg_dim"],
+                                    font=FONTS["small"])
         self._count_lbl.pack(side="right", padx=12)
 
-        pane = tk.PanedWindow(self, orient="horizontal", bg=BG_DARK,
+        pane = tk.PanedWindow(self, orient="horizontal", bg=THEME["bg_dark"],
                                sashwidth=6, sashrelief="flat")
         pane.pack(fill="both", expand=True)
 
-        tv_f = tk.Frame(pane, bg=BG_MID)
+        tv_f = tk.Frame(pane, bg=THEME["bg_mid"])
         pane.add(tv_f, minsize=460)
 
         cols = ("name","folder","size","anims","verts")
@@ -63,14 +66,14 @@ class ModelsTab(tk.Frame):
         self._tv.bind("<<TreeviewSelect>>", self._on_select)
 
         # Detail panel (right): metadata top + 3D viewer bottom + OBJ export
-        det = tk.Frame(pane, bg=BG_PANEL)
+        det = tk.Frame(pane, bg=THEME["bg_panel"])
         pane.add(det, minsize=300)
 
         # Header row
-        hdr = tk.Frame(det, bg=BG_PANEL, padx=10, pady=6)
+        hdr = tk.Frame(det, bg=THEME["bg_panel"], padx=10, pady=6)
         hdr.pack(fill="x")
-        tk.Label(hdr, text="MODEL DETAILS", bg=BG_PANEL, fg=ACCENT,
-                 font=("Segoe UI", 11, "bold")).pack(side="left")
+        tk.Label(hdr, text="MODEL DETAILS", bg=THEME["bg_panel"], fg=THEME["accent"],
+                 font=FONTS["header"]).pack(side="left")
         tk.Button(hdr, text="Export glTF", bg=ACCENT2, fg="#000000",
                   relief="flat", font=("Segoe UI", 9, "bold"), padx=8,
                   command=self._export_gltf).pack(side="right", padx=(0, 4))
@@ -81,46 +84,46 @@ class ModelsTab(tk.Frame):
         ttk.Separator(det).pack(fill="x")
 
         # ── Animation controls bar ────────────────────────────────────────
-        anim_bar = tk.Frame(det, bg=BG_DARK, padx=8, pady=4)
+        anim_bar = tk.Frame(det, bg=THEME["bg_dark"], padx=8, pady=4)
         anim_bar.pack(fill="x")
 
-        tk.Label(anim_bar, text="State:", bg=BG_DARK, fg=FG_DIM,
-                 font=("Segoe UI", 9)).pack(side="left")
+        tk.Label(anim_bar, text="State:", bg=THEME["bg_dark"], fg=THEME["fg_dim"],
+                 font=FONTS["small"]).pack(side="left")
 
         self._state_var = tk.StringVar(value="[0] Bind pose")
         self._state_cb  = ttk.Combobox(anim_bar, textvariable=self._state_var,
                                         state="readonly", width=22,
-                                        font=("Segoe UI", 9))
+                                        font=FONTS["small"])
         self._state_cb.pack(side="left", padx=(4, 8))
         self._state_cb.bind("<<ComboboxSelected>>", self._on_state_select)
 
         # Frame scrubber (shown only for multi-frame states)
         self._frame_var = tk.IntVar(value=0)
-        self._frame_lbl = tk.Label(anim_bar, text="Frame:", bg=BG_DARK, fg=FG_DIM,
-                                    font=("Segoe UI", 9))
+        self._frame_lbl = tk.Label(anim_bar, text="Frame:", bg=THEME["bg_dark"], fg=THEME["fg_dim"],
+                                    font=FONTS["small"])
         self._frame_scale = tk.Scale(anim_bar, variable=self._frame_var,
                                       from_=0, to=0, orient="horizontal",
-                                      bg=BG_DARK, fg=FG_TEXT, highlightthickness=0,
+                                      bg=THEME["bg_dark"], fg=THEME["fg_text"], highlightthickness=0,
                                       troughcolor=BG_PANEL, activebackground=ACCENT,
                                       length=80, showvalue=True,
                                       command=self._on_frame_change)
 
         # Play / Stop buttons
-        self._play_btn = tk.Button(anim_bar, text="▶ Play", bg=BG_MID, fg=FG_TEXT,
-                                    relief="flat", font=("Segoe UI", 9), padx=6,
+        self._play_btn = tk.Button(anim_bar, text="▶ Play", bg=THEME["bg_mid"], fg=THEME["fg_text"],
+                                    relief="flat", font=FONTS["small"], padx=6,
                                     command=self._anim_play)
-        self._stop_btn = tk.Button(anim_bar, text="■ Stop", bg=BG_MID, fg=FG_TEXT,
-                                    relief="flat", font=("Segoe UI", 9), padx=6,
+        self._stop_btn = tk.Button(anim_bar, text="■ Stop", bg=THEME["bg_mid"], fg=THEME["fg_text"],
+                                    relief="flat", font=FONTS["small"], padx=6,
                                     command=self._anim_stop)
         self._play_btn.pack(side="left", padx=(0, 2))
         self._stop_btn.pack(side="left", padx=(0, 8))
 
         self._fps_var = tk.IntVar(value=8)
-        tk.Label(anim_bar, text="FPS:", bg=BG_DARK, fg=FG_DIM,
-                 font=("Segoe UI", 9)).pack(side="left")
+        tk.Label(anim_bar, text="FPS:", bg=THEME["bg_dark"], fg=THEME["fg_dim"],
+                 font=FONTS["small"]).pack(side="left")
         tk.Spinbox(anim_bar, textvariable=self._fps_var, from_=1, to=30,
-                   width=3, bg=BG_PANEL, fg=FG_TEXT, relief="flat",
-                   font=("Segoe UI", 9)).pack(side="left", padx=(2, 0))
+                   width=3, bg=THEME["bg_panel"], fg=THEME["fg_text"], relief="flat",
+                   font=FONTS["small"]).pack(side="left", padx=(2, 0))
 
         self._anim_job  = None   # after() job id
         self._anim_frame = 0     # current playback frame
@@ -128,18 +131,18 @@ class ModelsTab(tk.Frame):
         ttk.Separator(det).pack(fill="x")
 
         # Vertical split: metadata text (top) + 3D viewer (bottom)
-        vpane = tk.PanedWindow(det, orient="vertical", bg=BG_DARK,
+        vpane = tk.PanedWindow(det, orient="vertical", bg=THEME["bg_dark"],
                                sashwidth=5, sashrelief="flat")
         vpane.pack(fill="both", expand=True)
 
-        meta_frame = tk.Frame(vpane, bg=BG_PANEL, padx=8, pady=4)
+        meta_frame = tk.Frame(vpane, bg=THEME["bg_panel"], padx=8, pady=4)
         vpane.add(meta_frame, minsize=100)
-        self._det_text = tk.Text(meta_frame, bg=BG_PANEL, fg=FG_TEXT,
+        self._det_text = tk.Text(meta_frame, bg=THEME["bg_panel"], fg=THEME["fg_text"],
                                   font=("Consolas", 9), relief="flat",
                                   state="disabled", wrap="word", height=7)
         self._det_text.pack(fill="both", expand=True)
         self._det_text.tag_configure("h",   foreground=ACCENT,  font=("Segoe UI", 10, "bold"))
-        self._det_text.tag_configure("kv",  foreground=ACCENT2, font=("Segoe UI", 9))
+        self._det_text.tag_configure("kv",  foreground=ACCENT2, font=FONTS["small"])
         self._det_text.tag_configure("list",foreground=ACCENT3, font=("Consolas", 8))
 
         self._viewer = ModelViewer3D(vpane)
@@ -557,7 +560,7 @@ CELL_H      = 66   # grid cell height (image + name)
 GRID_COLS   = 8    # thumbnails per row
 
 
-def _decode_tn_pixels(raw: bytes) -> Optional[bytes]:
+def decode_tn_pixels(raw: bytes) -> Optional[bytes]:
     """
     Decode a 768-byte .tn file to 1024 bytes of flat RGBA8888 (16×16 image).
     Palette index 0 is transparent (alpha=0); all others opaque.
@@ -588,14 +591,14 @@ def _decode_tn_pixels(raw: bytes) -> Optional[bytes]:
     return bytes(pixels)
 
 
-def _load_tn_image(tn_path: Path, size: int = THUMB_SIZE,
+def load_tn_image(tn_path: Path, size: int = THUMB_SIZE,
                    bg: tuple = (30, 42, 69)) -> Optional["Image.Image"]:
     """Load a 16×16 .tn thumbnail, composited over dark bg (index 0 = transparent)."""
     if not HAS_PIL:
         return None
     try:
         raw = tn_path.read_bytes()
-        px  = _decode_tn_pixels(raw)
+        px  = decode_tn_pixels(raw)
         if px is None:
             return None
         rgba = Image.frombytes('RGBA', (16, 16), px)

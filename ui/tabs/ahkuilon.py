@@ -1,8 +1,11 @@
 import tkinter as tk
+import os
+import re
 from tkinter import ttk, filedialog, messagebox
 import threading
 from pathlib import Path
 from typing import List, Dict, Optional, Tuple
+from ui.theme import THEME, FONTS
 from core.constants import *
 from ui.widgets import *
 from core.parsers import *
@@ -12,7 +15,7 @@ class AhkuilonTab(tk.Frame):
 
     def __init__(self, parent, config, status: StatusBar):
         self.cfg = config
-        super().__init__(parent, bg=BG_MID)
+        super().__init__(parent, bg=THEME["bg_mid"])
         self._status   = status
         self._cur_path : Optional[Path] = None
         self._objects  : List[Dict] = []
@@ -21,25 +24,25 @@ class AhkuilonTab(tk.Frame):
         self.after(300, self._load_files)
 
     def _build_ui(self):
-        bar = tk.Frame(self, bg=BG_DARK, pady=4)
+        bar = tk.Frame(self, bg=THEME["bg_dark"], pady=4)
         bar.pack(fill="x")
-        tk.Label(bar, text="Ahkuilon — Zone Scripts", bg=BG_DARK, fg=ACCENT,
-                 font=("Segoe UI", 11, "bold")).pack(side="left", padx=10)
-        self._count_lbl = tk.Label(bar, text="", bg=BG_DARK, fg=FG_DIM,
-                                   font=("Segoe UI", 9))
+        tk.Label(bar, text="Ahkuilon — Zone Scripts", bg=THEME["bg_dark"], fg=THEME["accent"],
+                 font=FONTS["header"]).pack(side="left", padx=10)
+        self._count_lbl = tk.Label(bar, text="", bg=THEME["bg_dark"], fg=THEME["fg_dim"],
+                                   font=FONTS["small"])
         self._count_lbl.pack(side="left", padx=8)
         tk.Button(bar, text="Export Scripts", bg=ACCENT2, fg="#000",
                   relief="flat", font=("Segoe UI", 9, "bold"), padx=8,
                   command=self._export_all).pack(side="right", padx=4)
 
-        pane = tk.PanedWindow(self, orient="horizontal", bg=BG_DARK,
+        pane = tk.PanedWindow(self, orient="horizontal", bg=THEME["bg_dark"],
                               sashwidth=4)
         pane.pack(fill="both", expand=True)
 
         # Left: file tree
-        left = tk.Frame(pane, bg=BG_PANEL, width=200)
+        left = tk.Frame(pane, bg=THEME["bg_panel"], width=200)
         pane.add(left, minsize=150)
-        tk.Label(left, text="Scripts", bg=BG_PANEL, fg=FG_DIM,
+        tk.Label(left, text="Scripts", bg=THEME["bg_panel"], fg=THEME["fg_dim"],
                  font=("Segoe UI", 9, "bold")).pack(anchor="w", padx=8, pady=(4, 0))
         sb = ttk.Scrollbar(left, orient="vertical")
         sb.pack(side="right", fill="y")
@@ -50,26 +53,26 @@ class AhkuilonTab(tk.Frame):
         self._tv.bind("<<TreeviewSelect>>", self._on_select)
 
         # Right: text + map
-        right = tk.Frame(pane, bg=BG_DARK)
+        right = tk.Frame(pane, bg=THEME["bg_dark"])
         pane.add(right, minsize=500)
 
-        v_pane = tk.PanedWindow(right, orient="vertical", bg=BG_DARK,
+        v_pane = tk.PanedWindow(right, orient="vertical", bg=THEME["bg_dark"],
                                 sashwidth=4)
         v_pane.pack(fill="both", expand=True)
 
         # Text viewer
-        txt_frame = tk.Frame(v_pane, bg=BG_PANEL)
+        txt_frame = tk.Frame(v_pane, bg=THEME["bg_panel"])
         v_pane.add(txt_frame, minsize=200)
 
-        info_bar = tk.Frame(txt_frame, bg=BG_MID, pady=3)
+        info_bar = tk.Frame(txt_frame, bg=THEME["bg_mid"], pady=3)
         info_bar.pack(fill="x")
-        self._file_lbl = tk.Label(info_bar, text="Select a script", bg=BG_MID,
-                                  fg=ACCENT, font=("Segoe UI", 10, "bold"))
+        self._file_lbl = tk.Label(info_bar, text="Select a script", bg=THEME["bg_mid"],
+                                  fg=THEME["accent"], font=("Segoe UI", 10, "bold"))
         self._file_lbl.pack(side="left", padx=10)
-        self._obj_lbl = tk.Label(info_bar, text="", bg=BG_MID, fg=FG_DIM,
-                                 font=("Segoe UI", 9))
+        self._obj_lbl = tk.Label(info_bar, text="", bg=THEME["bg_mid"], fg=THEME["fg_dim"],
+                                 font=FONTS["small"])
         self._obj_lbl.pack(side="left", padx=8)
-        tk.Button(info_bar, text="Open in Explorer", bg=BG_MID, fg=FG_DIM,
+        tk.Button(info_bar, text="Open in Explorer", bg=THEME["bg_mid"], fg=THEME["fg_dim"],
                   relief="flat", font=("Segoe UI", 8),
                   command=self._open_in_explorer).pack(side="right", padx=8)
 
@@ -77,7 +80,7 @@ class AhkuilonTab(tk.Frame):
         sb_h.pack(side="bottom", fill="x")
         sb_v = ttk.Scrollbar(txt_frame, orient="vertical")
         sb_v.pack(side="right", fill="y")
-        self._txt = tk.Text(txt_frame, bg=BG_PANEL, fg=FG_TEXT,
+        self._txt = tk.Text(txt_frame, bg=THEME["bg_panel"], fg=THEME["fg_text"],
                             font=("Consolas", 9), wrap="none", relief="flat",
                             xscrollcommand=sb_h.set, yscrollcommand=sb_v.set,
                             state="disabled")
@@ -98,14 +101,14 @@ class AhkuilonTab(tk.Frame):
         self._txt.tag_configure("string",  foreground=ACCENT3)
 
         # Object map
-        map_frame = tk.Frame(v_pane, bg=BG_DARK)
+        map_frame = tk.Frame(v_pane, bg=THEME["bg_dark"])
         v_pane.add(map_frame, minsize=160)
 
-        map_bar = tk.Frame(map_frame, bg=BG_MID, pady=3)
+        map_bar = tk.Frame(map_frame, bg=THEME["bg_mid"], pady=3)
         map_bar.pack(fill="x")
-        tk.Label(map_bar, text="Object Map  (CUBE triggers)", bg=BG_MID,
-                 fg=ACCENT2, font=("Segoe UI", 9, "bold")).pack(side="left", padx=10)
-        self._map_info = tk.Label(map_bar, text="", bg=BG_MID, fg=FG_DIM,
+        tk.Label(map_bar, text="Object Map  (CUBE triggers)", bg=THEME["bg_mid"],
+                 fg=THEME["accent_light"], font=("Segoe UI", 9, "bold")).pack(side="left", padx=10)
+        self._map_info = tk.Label(map_bar, text="", bg=THEME["bg_mid"], fg=THEME["fg_dim"],
                                   font=("Segoe UI", 8))
         self._map_info.pack(side="left", padx=8)
 
@@ -169,7 +172,7 @@ class AhkuilonTab(tk.Frame):
             self._status.set(f"Read error: {e}")
             return
 
-        self._objects = _parse_script_objects(content)
+        self._objects = parse_script_objects(content)
         lines = [l for l in content.splitlines() if l.strip()]
         self._obj_lbl.config(
             text=f"{len(self._objects)} CUBE objects  |  {len(lines)} lines")
@@ -204,7 +207,7 @@ class AhkuilonTab(tk.Frame):
 
         if not objs:
             c.create_text(cw // 2, ch // 2, text="No CUBE objects in this script",
-                          fill=FG_MUTED, font=("Segoe UI", 10))
+                          fill=FG_MUTED, font=FONTS["body"])
             return
 
         pad = 24

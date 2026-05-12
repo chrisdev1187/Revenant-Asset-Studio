@@ -1,9 +1,11 @@
 import tkinter as tk
+import re
 from tkinter import ttk, filedialog, messagebox
 import math
 import threading
 from pathlib import Path
 from typing import List, Dict, Optional, Tuple
+from ui.theme import THEME, FONTS
 from core.constants import *
 from ui.widgets import *
 from core.parsers import *
@@ -16,7 +18,7 @@ class ModelViewer3D(tk.Frame):
     """
 
     def __init__(self, parent, **kwargs):
-        super().__init__(parent, bg=BG_DARK, **kwargs)
+        super().__init__(parent, bg=THEME["bg_dark"], **kwargs)
         self._verts            : List[tuple] = []
         self._faces            : List[tuple] = []
         self._normals          : List[tuple] = []
@@ -34,14 +36,14 @@ class ModelViewer3D(tk.Frame):
 
     def _build(self):
         # ── Top toolbar ───────────────────────────────────────────────────────
-        toolbar = tk.Frame(self, bg=BG_DARK)
+        toolbar = tk.Frame(self, bg=THEME["bg_dark"])
         toolbar.pack(fill="x", side="top")
 
-        tk.Label(toolbar, text="Render:", bg=BG_DARK, fg=FG_DIM,
+        tk.Label(toolbar, text="Render:", bg=THEME["bg_dark"], fg=THEME["fg_dim"],
                  font=("Segoe UI", 8)).pack(side="left", padx=(6, 2))
         for label, val in [("Shaded", "shaded"), ("Textured", "textured")]:
             tk.Radiobutton(toolbar, text=label, variable=self._mode_var, value=val,
-                           bg=BG_DARK, fg=FG_TEXT, selectcolor=BG_PANEL,
+                           bg=THEME["bg_dark"], fg=THEME["fg_text"], selectcolor=BG_PANEL,
                            activebackground=BG_DARK, font=("Segoe UI", 8),
                            command=self._redraw).pack(side="left", padx=2)
 
@@ -49,7 +51,7 @@ class ModelViewer3D(tk.Frame):
                                  cursor="fleur")
         self._canvas.pack(fill="both", expand=True)
         self._info_lbl = tk.Label(self, text="Select a model to view",
-                                  bg=BG_DARK, fg=FG_MUTED,
+                                  bg=THEME["bg_dark"], fg=FG_MUTED,
                                   font=("Segoe UI", 8))
         self._info_lbl.pack(pady=(2, 4))
 
@@ -152,7 +154,7 @@ class ModelViewer3D(tk.Frame):
 
         if not self._verts:
             c.create_text(cw // 2, ch // 2, text="No geometry decoded",
-                          fill=FG_MUTED, font=("Segoe UI", 10))
+                          fill=FG_MUTED, font=FONTS["body"])
             return
 
         # ── Centre mesh on bounding-box centroid ───────────────────────────

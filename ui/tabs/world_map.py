@@ -1,17 +1,19 @@
 from PIL import Image
+import re
 import tkinter as tk
 from tkinter import ttk, filedialog, messagebox
 import threading
 from pathlib import Path
 from typing import List, Dict, Optional, Tuple
 ZoneKey = Tuple[str, int]
+from ui.theme import THEME, FONTS
 from core.constants import *
 from ui.widgets import *
 from core.parsers import *
 class WorldMapTab(tk.Frame):
     def __init__(self, parent, config, status: StatusBar):
         self.cfg = config
-        super().__init__(parent, bg=BG_MID)
+        super().__init__(parent, bg=THEME["bg_mid"])
         self._status  = status
         self._photo   = None
         self._img     = None
@@ -24,15 +26,15 @@ class WorldMapTab(tk.Frame):
 
     def _build_ui(self):
         # ── Toolbar ──────────────────────────────────────────────────────────
-        bar = tk.Frame(self, bg=BG_DARK, pady=4)
+        bar = tk.Frame(self, bg=THEME["bg_dark"], pady=4)
         bar.pack(fill="x")
 
-        tk.Label(bar, text="Zone:", bg=BG_DARK, fg=FG_DIM,
-                 font=("Segoe UI", 10)).pack(side="left", padx=(10, 4))
+        tk.Label(bar, text="Zone:", bg=THEME["bg_dark"], fg=THEME["fg_dim"],
+                 font=FONTS["body"]).pack(side="left", padx=(10, 4))
 
         self._zone_combo = ttk.Combobox(bar, textvariable=self._cur_zone,
                                          state="readonly", width=32,
-                                         font=("Segoe UI", 10))
+                                         font=FONTS["body"])
         self._zone_combo.pack(side="left", padx=4)
         self._zone_combo.bind("<<ComboboxSelected>>", self._on_zone_change)
 
@@ -53,20 +55,20 @@ class WorldMapTab(tk.Frame):
         self._extract_btn.pack(side="left", padx=4)
 
         # Zoom controls
-        tk.Label(bar, text="Zoom:", bg=BG_DARK, fg=FG_DIM,
-                 font=("Segoe UI", 10)).pack(side="left", padx=(20, 4))
+        tk.Label(bar, text="Zoom:", bg=THEME["bg_dark"], fg=THEME["fg_dim"],
+                 font=FONTS["body"]).pack(side="left", padx=(20, 4))
         for label, val in [("25%", 0.25), ("50%", 0.5), ("100%", 1.0)]:
-            tk.Button(bar, text=label, bg=BG_PANEL, fg=FG_TEXT, relief="flat",
-                      font=("Segoe UI", 9), padx=6,
+            tk.Button(bar, text=label, bg=THEME["bg_panel"], fg=THEME["fg_text"], relief="flat",
+                      font=FONTS["small"], padx=6,
                       command=lambda v=val: self._set_zoom(v)
                       ).pack(side="left", padx=2)
 
-        self._tile_lbl = tk.Label(bar, text="", bg=BG_DARK, fg=FG_DIM,
-                                   font=("Segoe UI", 9))
+        self._tile_lbl = tk.Label(bar, text="", bg=THEME["bg_dark"], fg=THEME["fg_dim"],
+                                   font=FONTS["small"])
         self._tile_lbl.pack(side="right", padx=12)
 
         # ── Scrollable canvas ─────────────────────────────────────────────────
-        frame = tk.Frame(self, bg=BG_MID)
+        frame = tk.Frame(self, bg=THEME["bg_mid"])
         frame.pack(fill="both", expand=True)
 
         self._canvas = tk.Canvas(frame, bg="#0a0a14", cursor="crosshair",
@@ -238,14 +240,16 @@ class WorldMapTab(tk.Frame):
         mk = self._current_zone_key()
         module, zone = mk
         self._status.set(f"Stitching {module} zone {zone}...")
+        overlay = LoadingOverlay(self, text=f"Stitching {module} Zone {zone}...")
 
-        def _worker(self=self, zone=zone, module=module, mk=mk):
+        def _worker(self=self, zone=zone, module=module, mk=mk, overlay=overlay):
             img = stitch_zone_map(self.cfg, zone, module)
-            self.after(0, lambda: self._on_stitch_done(mk, img))
+            self.after(0, lambda: self._on_stitch_done(mk, img, overlay))
 
         threading.Thread(target=_worker, daemon=True).start()
 
-    def _on_stitch_done(self, mk: ZoneKey, img):
+    def _on_stitch_done(self, mk: ZoneKey, img, overlay):
+        overlay.destroy()
         module, zone = mk
         if img is None:
             self._status.set(f"No tiles found for {module} zone {zone}  (check Diagnose for tile counts)")
@@ -316,13 +320,13 @@ class WorldMapTab(tk.Frame):
         from core.parsers import all_automap_dirs, get_unextracted_modules
         win = tk.Toplevel(self)
         win.title("Automap Diagnostic")
-        win.configure(bg=BG_DARK)
+        win.configure(bg=THEME["bg_dark"])
         win.geometry("700x540")
 
-        tk.Label(win, text="AUTOMAP DIAGNOSTIC", bg=BG_DARK, fg=ACCENT,
+        tk.Label(win, text="AUTOMAP DIAGNOSTIC", bg=THEME["bg_dark"], fg=THEME["accent"],
                  font=("Segoe UI", 12, "bold")).pack(anchor="w", padx=14, pady=(12, 4))
 
-        txt = tk.Text(win, bg="#0c0c14", fg=FG_TEXT, font=("Consolas", 9),
+        txt = tk.Text(win, bg="#0c0c14", fg=THEME["fg_text"], font=("Consolas", 9),
                       relief="flat", wrap="none")
         sb_y = ttk.Scrollbar(win, orient="vertical",   command=txt.yview)
         sb_x = ttk.Scrollbar(win, orient="horizontal", command=txt.xview)

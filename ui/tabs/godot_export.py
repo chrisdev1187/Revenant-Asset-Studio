@@ -1,7 +1,9 @@
 import tkinter as tk
+import re
 from tkinter import ttk, filedialog
 import threading
 from pathlib import Path
+from ui.theme import THEME, FONTS
 from core.constants import *
 from ui.widgets import StatusBar
 from core.godot_exporter import GodotExporter
@@ -9,26 +11,26 @@ from core.godot_exporter import GodotExporter
 class GodotExportTab(tk.Frame):
     def __init__(self, parent, config, status: StatusBar):
         self.cfg = config
-        super().__init__(parent, bg=BG_MID)
+        super().__init__(parent, bg=THEME["bg_mid"])
         self._status = status
         self._build_ui()
 
     def _build_ui(self):
-        bar = tk.Frame(self, bg=BG_DARK, pady=5); bar.pack(fill='x')
-        tk.Label(bar, text='Godot Engine systematic Port', bg=BG_DARK, fg=ACCENT, font=('Segoe UI', 11, 'bold')).pack(side='left', padx=10)
+        bar = tk.Frame(self, bg=THEME["bg_dark"], pady=5); bar.pack(fill='x')
+        tk.Label(bar, text='Godot Engine systematic Port', bg=THEME["bg_dark"], fg=THEME["accent"], font=('Segoe UI', 11, 'bold')).pack(side='left', padx=10)
 
-        pane = tk.PanedWindow(self, orient='horizontal', bg=BG_DARK, sashwidth=4); pane.pack(fill='both', expand=True)
-        left = tk.Frame(pane, bg=BG_PANEL, width=300); pane.add(left, minsize=250)
-        tk.Label(left, text='Project Root:', bg=BG_PANEL, fg=FG_DIM, font=('Segoe UI', 8)).pack(anchor='w', padx=10, pady=(10,0))
+        pane = tk.PanedWindow(self, orient='horizontal', bg=THEME["bg_dark"], sashwidth=4); pane.pack(fill='both', expand=True)
+        left = tk.Frame(pane, bg=THEME["bg_panel"], width=300); pane.add(left, minsize=250)
+        tk.Label(left, text='Project Root:', bg=THEME["bg_panel"], fg=THEME["fg_dim"], font=('Segoe UI', 8)).pack(anchor='w', padx=10, pady=(10,0))
         self._proj_var = tk.StringVar()
-        row = tk.Frame(left, bg=BG_PANEL); row.pack(fill='x', padx=10, pady=2)
-        tk.Entry(row, textvariable=self._proj_var, bg=BG_CARD, fg=FG_TEXT, relief='flat').pack(side='left', fill='x', expand=True)
+        row = tk.Frame(left, bg=THEME["bg_panel"]); row.pack(fill='x', padx=10, pady=2)
+        tk.Entry(row, textvariable=self._proj_var, bg=BG_CARD, fg=THEME["fg_text"], relief='flat').pack(side='left', fill='x', expand=True)
         tk.Button(row, text='...', command=self._browse).pack(side='right')
 
         tk.Button(left, text='FULL REBUILD', bg=ACCENT, command=self._run_full, pady=10).pack(fill='x', padx=10, pady=20)
 
-        right = tk.Frame(pane, bg=BG_DARK); pane.add(right, minsize=400)
-        self._log = tk.Text(right, bg=BG_DARK, fg=FG_TEXT, font=('Consolas', 8), state='disabled'); self._log.pack(fill='both', expand=True, padx=10, pady=10)
+        right = tk.Frame(pane, bg=THEME["bg_dark"]); pane.add(right, minsize=400)
+        self._log = tk.Text(right, bg=THEME["bg_dark"], fg=THEME["fg_text"], font=('Consolas', 8), state='disabled'); self._log.pack(fill='both', expand=True, padx=10, pady=10)
 
     def _browse(self):
         d = filedialog.askdirectory();

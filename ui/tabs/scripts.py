@@ -1,29 +1,31 @@
 import tkinter as tk
+import re
 from tkinter import ttk, filedialog, messagebox
 import threading
 from pathlib import Path
 from typing import List, Dict, Optional, Tuple
+from ui.theme import THEME, FONTS
 from core.constants import *
 from ui.widgets import *
 from core.parsers import *
 class ScriptsTab(tk.Frame):
     def __init__(self, parent, config, status: StatusBar):
         self.cfg = config
-        super().__init__(parent, bg=BG_MID)
+        super().__init__(parent, bg=THEME["bg_mid"])
         self._status  = status
         self._def_files: List[Path] = []
         self._build_ui()
         self.after(500, self._load_all)
 
     def _build_ui(self):
-        bar = tk.Frame(self, bg=BG_DARK, pady=4)
+        bar = tk.Frame(self, bg=THEME["bg_dark"], pady=4)
         bar.pack(fill="x")
         self._search_var = tk.StringVar()
-        tk.Label(bar, text="Search in files:", bg=BG_DARK, fg=FG_DIM,
-                 font=("Segoe UI", 10)).pack(side="left", padx=(10,4))
+        tk.Label(bar, text="Search in files:", bg=THEME["bg_dark"], fg=THEME["fg_dim"],
+                 font=FONTS["body"]).pack(side="left", padx=(10,4))
         tk.Entry(bar, textvariable=self._search_var,
-                  bg=BG_PANEL, fg=FG_TEXT, insertbackground=FG_TEXT,
-                  font=("Segoe UI", 10), relief="flat", width=30
+                  bg=THEME["bg_panel"], fg=THEME["fg_text"], insertbackground=FG_TEXT,
+                  font=FONTS["body"], relief="flat", width=30
                   ).pack(side="left", padx=4)
         tk.Button(bar, text="Search", command=self._do_search,
                   bg=ACCENT2, fg="white", relief="flat",
@@ -33,20 +35,20 @@ class ScriptsTab(tk.Frame):
                   bg=ACCENT3, fg="#000", relief="flat",
                   font=("Segoe UI", 9, "bold"), padx=8
                   ).pack(side="left", padx=4)
-        self._count_lbl = tk.Label(bar, text="", bg=BG_DARK, fg=FG_DIM,
-                                    font=("Segoe UI", 9))
+        self._count_lbl = tk.Label(bar, text="", bg=THEME["bg_dark"], fg=THEME["fg_dim"],
+                                    font=FONTS["small"])
         self._count_lbl.pack(side="right", padx=12)
 
-        pane = tk.PanedWindow(self, orient="horizontal", bg=BG_DARK,
+        pane = tk.PanedWindow(self, orient="horizontal", bg=THEME["bg_dark"],
                                sashwidth=6, sashrelief="flat")
         pane.pack(fill="both", expand=True)
 
         # File tree
-        lf = tk.Frame(pane, bg=BG_MID)
+        lf = tk.Frame(pane, bg=THEME["bg_mid"])
         pane.add(lf, minsize=220)
-        tk.Label(lf, text=".DEF FILES", bg=BG_MID, fg=ACCENT,
+        tk.Label(lf, text=".DEF FILES", bg=THEME["bg_mid"], fg=THEME["accent"],
                  font=("Segoe UI", 9, "bold"), pady=4).pack(anchor="w", padx=8)
-        self._file_lb = tk.Listbox(lf, bg=BG_PANEL, fg=FG_TEXT,
+        self._file_lb = tk.Listbox(lf, bg=THEME["bg_panel"], fg=THEME["fg_text"],
                                     font=("Consolas", 9), selectmode="single",
                                     relief="flat", activestyle="dotbox",
                                     selectbackground=BG_CARD,
@@ -58,11 +60,11 @@ class ScriptsTab(tk.Frame):
         self._file_lb.bind("<<ListboxSelect>>", self._on_file_select)
 
         # Content + search results
-        right = tk.Frame(pane, bg=BG_PANEL)
+        right = tk.Frame(pane, bg=THEME["bg_panel"])
         pane.add(right)
 
         # Search results
-        self._results_frame = tk.Frame(right, bg=BG_DARK)
+        self._results_frame = tk.Frame(right, bg=THEME["bg_dark"])
         self._results_tv = ttk.Treeview(self._results_frame,
                                          columns=("file","line","text"),
                                          show="headings", height=8)
@@ -81,17 +83,17 @@ class ScriptsTab(tk.Frame):
         # Hidden by default
 
         # File content viewer
-        self._content_frame = tk.Frame(right, bg=BG_PANEL)
+        self._content_frame = tk.Frame(right, bg=THEME["bg_panel"])
         self._content_frame.pack(fill="both", expand=True)
 
-        hdr = tk.Frame(self._content_frame, bg=BG_DARK, pady=2)
+        hdr = tk.Frame(self._content_frame, bg=THEME["bg_dark"], pady=2)
         hdr.pack(fill="x")
-        self._file_lbl = tk.Label(hdr, text="Select a file", bg=BG_DARK,
-                                   fg=ACCENT2, font=("Segoe UI", 9, "bold"))
+        self._file_lbl = tk.Label(hdr, text="Select a file", bg=THEME["bg_dark"],
+                                   fg=THEME["accent_light"], font=("Segoe UI", 9, "bold"))
         self._file_lbl.pack(side="left", padx=8)
 
-        self._content_text = tk.Text(self._content_frame, bg=BG_PANEL,
-                                      fg=FG_TEXT, font=("Consolas", 9),
+        self._content_text = tk.Text(self._content_frame, bg=THEME["bg_panel"],
+                                      fg=THEME["fg_text"], font=("Consolas", 9),
                                       relief="flat", state="disabled",
                                       wrap="none")
         sb_h = ttk.Scrollbar(self._content_frame, orient="horizontal",

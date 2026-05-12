@@ -1,8 +1,11 @@
 import tkinter as tk
+import os
+import re
 from tkinter import ttk, filedialog, messagebox
 import threading
 from pathlib import Path
 from typing import List, Dict, Optional, Tuple
+from ui.theme import THEME, FONTS
 from core.constants import *
 from ui.widgets import *
 from core.parsers import *
@@ -11,29 +14,29 @@ class CinematiXTab(tk.Frame):
 
     def __init__(self, parent, config, status: StatusBar):
         self.cfg = config
-        super().__init__(parent, bg=BG_MID)
+        super().__init__(parent, bg=THEME["bg_mid"])
         self._status = status
         self._videos: List[Dict] = []
         self._build_ui()
         self.after(300, self._load_all)
 
     def _build_ui(self):
-        bar = tk.Frame(self, bg=BG_DARK, pady=4)
+        bar = tk.Frame(self, bg=THEME["bg_dark"], pady=4)
         bar.pack(fill="x")
-        tk.Label(bar, text="Revenant FMV / Cinematix Videos", bg=BG_DARK,
-                 fg=FG_DIM, font=("Segoe UI", 10)).pack(side="left", padx=10)
+        tk.Label(bar, text="Revenant FMV / Cinematix Videos", bg=THEME["bg_dark"],
+                 fg=THEME["fg_dim"], font=FONTS["body"]).pack(side="left", padx=10)
         tk.Button(bar, text="▶ Play", bg=ACCENT, fg="white", relief="flat",
                   font=("Segoe UI", 10, "bold"), padx=10,
                   command=self._play_selected).pack(side="left", padx=8)
-        self._count_lbl = tk.Label(bar, text="", bg=BG_DARK, fg=FG_DIM,
-                                   font=("Segoe UI", 9))
+        self._count_lbl = tk.Label(bar, text="", bg=THEME["bg_dark"], fg=THEME["fg_dim"],
+                                   font=FONTS["small"])
         self._count_lbl.pack(side="right", padx=12)
 
-        pane = tk.PanedWindow(self, orient="horizontal", bg=BG_DARK,
+        pane = tk.PanedWindow(self, orient="horizontal", bg=THEME["bg_dark"],
                               sashwidth=6, sashrelief="flat")
         pane.pack(fill="both", expand=True)
 
-        tv_f = tk.Frame(pane, bg=BG_MID)
+        tv_f = tk.Frame(pane, bg=THEME["bg_mid"])
         pane.add(tv_f, minsize=400)
         cols = ("name", "size", "path")
         self._tv = ttk.Treeview(tv_f, columns=cols, show="headings",
@@ -50,17 +53,17 @@ class CinematiXTab(tk.Frame):
         self._tv.pack(fill="both", expand=True)
         self._tv.bind("<Double-Button-1>", lambda e: self._play_selected())
 
-        det = tk.Frame(pane, bg=BG_PANEL, padx=14, pady=12)
+        det = tk.Frame(pane, bg=THEME["bg_panel"], padx=14, pady=12)
         pane.add(det, minsize=240)
-        tk.Label(det, text="VIDEO INFO", bg=BG_PANEL, fg=ACCENT,
-                 font=("Segoe UI", 11, "bold")).pack(anchor="w")
+        tk.Label(det, text="VIDEO INFO", bg=THEME["bg_panel"], fg=THEME["accent"],
+                 font=FONTS["header"]).pack(anchor="w")
         ttk.Separator(det).pack(fill="x", pady=6)
         self._det_lbl = tk.Label(det, text="Select a video to preview info",
-                                 bg=BG_PANEL, fg=FG_DIM, font=("Segoe UI", 9),
+                                 bg=THEME["bg_panel"], fg=THEME["fg_dim"], font=FONTS["small"],
                                  wraplength=200, justify="left", anchor="w")
         self._det_lbl.pack(anchor="w")
         tk.Label(det, text="\nDouble-click or press ▶ Play to open\nwith the system's default video player\n(install VLC for best SMK support).",
-                 bg=BG_PANEL, fg=FG_MUTED, font=("Segoe UI", 8),
+                 bg=THEME["bg_panel"], fg=FG_MUTED, font=("Segoe UI", 8),
                  justify="left").pack(anchor="w", pady=8)
 
     def _load_all(self):

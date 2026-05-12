@@ -314,3 +314,11 @@ def get_unextracted_modules(config) -> List[str]:
         if not out_dir.exists() or not any(out_dir.rglob("*")):
             unextracted.append(stem)
     return sorted(list(set(unextracted)))
+
+def parse_i3d_anim_count(path: Path) -> int:
+    import struct
+    try:
+        raw = path.read_bytes()
+        if len(raw) < 8 or raw[:4] != b'CGSR': return 0
+        return struct.unpack_from('<H', raw, 0x06)[0] + 1
+    except Exception: return 0

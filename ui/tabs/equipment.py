@@ -1,15 +1,17 @@
 import tkinter as tk
+import re
 from tkinter import ttk, filedialog, messagebox
 import threading
 from pathlib import Path
 from typing import List, Dict, Optional, Tuple
+from ui.theme import THEME, FONTS
 from core.constants import *
 from ui.widgets import *
 from core.parsers import *
 class EquipmentTab(tk.Frame):
     def __init__(self, parent, config, status: StatusBar):
         self.cfg = config
-        super().__init__(parent, bg=BG_MID)
+        super().__init__(parent, bg=THEME["bg_mid"])
         self._status  = status
         self._weapons = []
         self._armors  = []
@@ -20,8 +22,8 @@ class EquipmentTab(tk.Frame):
         nb = ttk.Notebook(self)
         nb.pack(fill="both", expand=True, padx=4, pady=4)
 
-        self._wpn_frame = tk.Frame(nb, bg=BG_MID)
-        self._arm_frame = tk.Frame(nb, bg=BG_MID)
+        self._wpn_frame = tk.Frame(nb, bg=THEME["bg_mid"])
+        self._arm_frame = tk.Frame(nb, bg=THEME["bg_mid"])
         nb.add(self._wpn_frame, text=f"  Weapons  ")
         nb.add(self._arm_frame, text=f"  Armour   ")
 
@@ -30,30 +32,30 @@ class EquipmentTab(tk.Frame):
 
     def _build_weapon_panel(self, parent):
         # Toolbar
-        bar = tk.Frame(parent, bg=BG_DARK, pady=4)
+        bar = tk.Frame(parent, bg=THEME["bg_dark"], pady=4)
         bar.pack(fill="x")
         self._wpn_filter_var = tk.StringVar()
-        tk.Label(bar, text="Filter:", bg=BG_DARK, fg=FG_DIM,
-                 font=("Segoe UI", 10)).pack(side="left", padx=(10,4))
+        tk.Label(bar, text="Filter:", bg=THEME["bg_dark"], fg=THEME["fg_dim"],
+                 font=FONTS["body"]).pack(side="left", padx=(10,4))
         tk.Entry(bar, textvariable=self._wpn_filter_var,
-                  bg=BG_PANEL, fg=FG_TEXT, insertbackground=FG_TEXT,
-                  font=("Segoe UI", 10), relief="flat", width=20
+                  bg=THEME["bg_panel"], fg=THEME["fg_text"], insertbackground=FG_TEXT,
+                  font=FONTS["body"], relief="flat", width=20
                   ).pack(side="left", padx=4)
         self._wpn_filter_var.trace_add("write", self._filter_weapons)
         tk.Button(bar, text="Export All Icons", bg=ACCENT2, fg="#000",
                   relief="flat", font=("Segoe UI", 9, "bold"), padx=8,
                   command=self._export_all_weapons).pack(side="right", padx=4)
-        self._wpn_count = tk.Label(bar, text="", bg=BG_DARK, fg=FG_DIM,
-                                    font=("Segoe UI", 9))
+        self._wpn_count = tk.Label(bar, text="", bg=THEME["bg_dark"], fg=THEME["fg_dim"],
+                                    font=FONTS["small"])
         self._wpn_count.pack(side="right", padx=12)
 
         # Table + detail pane
-        pane = tk.PanedWindow(parent, orient="horizontal", bg=BG_DARK,
+        pane = tk.PanedWindow(parent, orient="horizontal", bg=THEME["bg_dark"],
                                sashwidth=6, sashrelief="flat")
         pane.pack(fill="both", expand=True)
 
         # Treeview
-        tv_frame = tk.Frame(pane, bg=BG_MID)
+        tv_frame = tk.Frame(pane, bg=THEME["bg_mid"])
         pane.add(tv_frame, minsize=400)
 
         cols = ("name","type","dmg","value","min_str")
@@ -78,12 +80,12 @@ class EquipmentTab(tk.Frame):
         self._wpn_tv.bind("<<TreeviewSelect>>", self._on_weapon_select)
 
         # Detail
-        det = tk.Frame(pane, bg=BG_PANEL, padx=12, pady=12)
+        det = tk.Frame(pane, bg=THEME["bg_panel"], padx=12, pady=12)
         pane.add(det, minsize=220)
-        tk.Label(det, text="WEAPON DETAILS", bg=BG_PANEL, fg=GOLD,
-                 font=("Segoe UI", 11, "bold")).pack(anchor="w")
+        tk.Label(det, text="WEAPON DETAILS", bg=THEME["bg_panel"], fg=THEME["gold"],
+                 font=FONTS["header"]).pack(anchor="w")
         ttk.Separator(det).pack(fill="x", pady=6)
-        self._wpn_detail = tk.Text(det, bg=BG_PANEL, fg=FG_TEXT,
+        self._wpn_detail = tk.Text(det, bg=THEME["bg_panel"], fg=THEME["fg_text"],
                                     font=("Consolas", 9), relief="flat",
                                     state="disabled", wrap="word", height=20)
         self._wpn_detail.pack(fill="both", expand=True)
@@ -91,32 +93,32 @@ class EquipmentTab(tk.Frame):
         self._wpn_detail.tag_configure("kv", foreground=ACCENT2, font=("Segoe UI",9))
 
         # tn thumbnail display
-        self._wpn_img_lbl = tk.Label(det, bg=BG_PANEL)
+        self._wpn_img_lbl = tk.Label(det, bg=THEME["bg_panel"])
         self._wpn_img_lbl.pack(pady=4)
 
     def _build_armor_panel(self, parent):
-        bar = tk.Frame(parent, bg=BG_DARK, pady=4)
+        bar = tk.Frame(parent, bg=THEME["bg_dark"], pady=4)
         bar.pack(fill="x")
         self._arm_filter_var = tk.StringVar()
-        tk.Label(bar, text="Filter:", bg=BG_DARK, fg=FG_DIM,
-                 font=("Segoe UI", 10)).pack(side="left", padx=(10,4))
+        tk.Label(bar, text="Filter:", bg=THEME["bg_dark"], fg=THEME["fg_dim"],
+                 font=FONTS["body"]).pack(side="left", padx=(10,4))
         tk.Entry(bar, textvariable=self._arm_filter_var,
-                  bg=BG_PANEL, fg=FG_TEXT, insertbackground=FG_TEXT,
-                  font=("Segoe UI", 10), relief="flat", width=20
+                  bg=THEME["bg_panel"], fg=THEME["fg_text"], insertbackground=FG_TEXT,
+                  font=FONTS["body"], relief="flat", width=20
                   ).pack(side="left", padx=4)
         self._arm_filter_var.trace_add("write", self._filter_armors)
         tk.Button(bar, text="Export All Icons", bg=ACCENT2, fg="#000",
                   relief="flat", font=("Segoe UI", 9, "bold"), padx=8,
                   command=self._export_all_armors).pack(side="right", padx=4)
-        self._arm_count = tk.Label(bar, text="", bg=BG_DARK, fg=FG_DIM,
-                                    font=("Segoe UI", 9))
+        self._arm_count = tk.Label(bar, text="", bg=THEME["bg_dark"], fg=THEME["fg_dim"],
+                                    font=FONTS["small"])
         self._arm_count.pack(side="right", padx=12)
 
-        pane = tk.PanedWindow(parent, orient="horizontal", bg=BG_DARK,
+        pane = tk.PanedWindow(parent, orient="horizontal", bg=THEME["bg_dark"],
                                sashwidth=6, sashrelief="flat")
         pane.pack(fill="both", expand=True)
 
-        tv_frame = tk.Frame(pane, bg=BG_MID)
+        tv_frame = tk.Frame(pane, bg=THEME["bg_mid"])
         pane.add(tv_frame, minsize=400)
 
         cols = ("name","slot","prot","value","min_str")
@@ -140,12 +142,12 @@ class EquipmentTab(tk.Frame):
         self._arm_tv.pack(fill="both", expand=True)
         self._arm_tv.bind("<<TreeviewSelect>>", self._on_armor_select)
 
-        det2 = tk.Frame(pane, bg=BG_PANEL, padx=12, pady=12)
+        det2 = tk.Frame(pane, bg=THEME["bg_panel"], padx=12, pady=12)
         pane.add(det2, minsize=220)
-        tk.Label(det2, text="ARMOUR DETAILS", bg=BG_PANEL, fg=ACCENT3,
-                 font=("Segoe UI", 11, "bold")).pack(anchor="w")
+        tk.Label(det2, text="ARMOUR DETAILS", bg=THEME["bg_panel"], fg=THEME["success"],
+                 font=FONTS["header"]).pack(anchor="w")
         ttk.Separator(det2).pack(fill="x", pady=6)
-        self._arm_detail = tk.Text(det2, bg=BG_PANEL, fg=FG_TEXT,
+        self._arm_detail = tk.Text(det2, bg=THEME["bg_panel"], fg=THEME["fg_text"],
                                     font=("Consolas", 9), relief="flat",
                                     state="disabled", wrap="word", height=20)
         self._arm_detail.pack(fill="both", expand=True)
@@ -153,7 +155,7 @@ class EquipmentTab(tk.Frame):
         self._arm_detail.tag_configure("kv", foreground=ACCENT2, font=("Segoe UI",9))
 
         # tn thumbnail display
-        self._arm_img_lbl = tk.Label(det2, bg=BG_PANEL)
+        self._arm_img_lbl = tk.Label(det2, bg=THEME["bg_panel"])
         self._arm_img_lbl.pack(pady=4)
 
     def _load_all(self):

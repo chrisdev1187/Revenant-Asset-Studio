@@ -5,6 +5,7 @@ from tkinter import ttk, filedialog, messagebox
 import threading
 from pathlib import Path
 from typing import List, Dict, Optional, Tuple
+from ui.theme import THEME, FONTS
 from core.constants import *
 from ui.widgets import *
 from core.parsers import *
@@ -44,7 +45,7 @@ class UpscaleTab(tk.Frame):
 
     def __init__(self, parent, config, status: StatusBar):
         self.cfg = config
-        super().__init__(parent, bg=BG_MID)
+        super().__init__(parent, bg=THEME["bg_mid"])
         self._status   = status
         self._stop     = False
         self._running  = False
@@ -61,10 +62,10 @@ class UpscaleTab(tk.Frame):
 
     def _build_ui(self):
         # Top toolbar
-        bar = tk.Frame(self, bg=BG_DARK, pady=5)
+        bar = tk.Frame(self, bg=THEME["bg_dark"], pady=5)
         bar.pack(fill="x")
-        tk.Label(bar, text="Asset Upscaler", bg=BG_DARK, fg=ACCENT,
-                 font=("Segoe UI", 11, "bold")).pack(side="left", padx=10)
+        tk.Label(bar, text="Asset Upscaler", bg=THEME["bg_dark"], fg=THEME["accent"],
+                 font=FONTS["header"]).pack(side="left", padx=10)
 
         self._stop_btn = tk.Button(bar, text="Stop", bg=RED, fg="#fff",
                                    relief="flat", font=("Segoe UI", 9, "bold"),
@@ -78,8 +79,8 @@ class UpscaleTab(tk.Frame):
                                     command=self._start_upscale)
         self._start_btn.pack(side="right", padx=4)
 
-        tk.Label(bar, text="Scale:", bg=BG_DARK, fg=FG_DIM,
-                 font=("Segoe UI", 9)).pack(side="right", padx=(10, 2))
+        tk.Label(bar, text="Scale:", bg=THEME["bg_dark"], fg=THEME["fg_dim"],
+                 font=FONTS["small"]).pack(side="right", padx=(10, 2))
         self._scale_var = tk.StringVar(value="4")
         ttk.Combobox(bar, textvariable=self._scale_var, values=["2", "4"],
                      state="readonly", width=3).pack(side="right")
@@ -88,13 +89,13 @@ class UpscaleTab(tk.Frame):
         self._strength_var = tk.StringVar(value="0.65")
 
         # Horizontal split: left (categories) | right (results + compare)
-        pane = tk.PanedWindow(self, orient="horizontal", bg=BG_DARK, sashwidth=4)
+        pane = tk.PanedWindow(self, orient="horizontal", bg=THEME["bg_dark"], sashwidth=4)
         pane.pack(fill="both", expand=True)
 
         # ── Left: category checklist ─────────────────────────────────────────
-        left = tk.Frame(pane, bg=BG_PANEL, width=270)
+        left = tk.Frame(pane, bg=THEME["bg_panel"], width=270)
         pane.add(left, minsize=200)
-        tk.Label(left, text="Categories", bg=BG_PANEL, fg=FG_DIM,
+        tk.Label(left, text="Categories", bg=THEME["bg_panel"], fg=THEME["fg_dim"],
                  font=("Segoe UI", 9, "bold")).pack(anchor="w", padx=10, pady=(8, 4))
 
         self._cats = {}
@@ -104,16 +105,16 @@ class UpscaleTab(tk.Frame):
                             ("model_textures", "Model Textures"),
                             ("sprites",        "Sprites (clean)"),
                             ("cinematix",      "Cinematix  (SMK→MP4)")]:
-            row = tk.Frame(left, bg=BG_PANEL)
+            row = tk.Frame(left, bg=THEME["bg_panel"])
             row.pack(fill="x", padx=8, pady=2)
             var = tk.BooleanVar(value=(key not in ("sprites", "cinematix")))
             tk.Checkbutton(row, variable=var, text=label,
-                           bg=BG_PANEL, fg=FG_TEXT, selectcolor=BG_CARD,
+                           bg=THEME["bg_panel"], fg=THEME["fg_text"], selectcolor=BG_CARD,
                            activebackground=BG_PANEL, activeforeground=FG_TEXT,
-                           font=("Segoe UI", 9), anchor="w").pack(side="left", fill="x", expand=True)
-            cnt = tk.Label(row, text="…", bg=BG_PANEL, fg=FG_DIM, font=("Segoe UI", 8))
+                           font=FONTS["small"], anchor="w").pack(side="left", fill="x", expand=True)
+            cnt = tk.Label(row, text="…", bg=THEME["bg_panel"], fg=THEME["fg_dim"], font=("Segoe UI", 8))
             cnt.pack(side="right", padx=4)
-            tk.Button(row, text="▶1", bg=BG_CARD, fg=ACCENT2, relief="flat",
+            tk.Button(row, text="▶1", bg=BG_CARD, fg=THEME["accent_light"], relief="flat",
                       font=("Segoe UI", 7, "bold"), padx=3, pady=0,
                       cursor="hand2",
                       command=lambda k=key: self._test_single(k)).pack(side="right", padx=(0, 2))
@@ -121,27 +122,27 @@ class UpscaleTab(tk.Frame):
 
         # FFmpeg section (required for Cinematix)
         tk.Frame(left, bg=BORDER, height=1).pack(fill="x", padx=8, pady=(6, 2))
-        ff_hdr = tk.Frame(left, bg=BG_PANEL)
+        ff_hdr = tk.Frame(left, bg=THEME["bg_panel"])
         ff_hdr.pack(fill="x", padx=8, pady=(2, 0))
-        tk.Label(ff_hdr, text="FFmpeg", bg=BG_PANEL, fg=FG_DIM,
+        tk.Label(ff_hdr, text="FFmpeg", bg=THEME["bg_panel"], fg=THEME["fg_dim"],
                  font=("Segoe UI", 8, "bold")).pack(side="left")
-        self._ffmpeg_status_lbl = tk.Label(ff_hdr, bg=BG_PANEL,
+        self._ffmpeg_status_lbl = tk.Label(ff_hdr, bg=THEME["bg_panel"],
                                             font=("Segoe UI", 8, "bold"))
         self._ffmpeg_status_lbl.pack(side="left", padx=4)
 
-        ff_btns = tk.Frame(left, bg=BG_PANEL)
+        ff_btns = tk.Frame(left, bg=THEME["bg_panel"])
         ff_btns.pack(fill="x", padx=8, pady=1)
         self._install_btn = tk.Button(ff_btns, text="Install to project",
                                       bg=ACCENT2, fg="#000", relief="flat",
                                       font=("Segoe UI", 8, "bold"), padx=6,
                                       command=self._install_ffmpeg)
         self._install_btn.pack(side="left")
-        tk.Button(ff_btns, text="Browse", bg=BG_CARD, fg=FG_TEXT,
+        tk.Button(ff_btns, text="Browse", bg=BG_CARD, fg=THEME["fg_text"],
                   relief="flat", font=("Segoe UI", 8), padx=4,
                   command=self._browse_ffmpeg).pack(side="left", padx=4)
 
         self._ffmpeg_path_var = tk.StringVar(value=self._ffmpeg_path)
-        tk.Entry(left, textvariable=self._ffmpeg_path_var, bg=BG_CARD, fg=FG_DIM,
+        tk.Entry(left, textvariable=self._ffmpeg_path_var, bg=BG_CARD, fg=THEME["fg_dim"],
                  font=("Consolas", 7), relief="flat",
                  insertbackground=FG_TEXT).pack(fill="x", padx=8, pady=(1, 4))
         self._ffmpeg_path_var.trace_add("write",
@@ -151,15 +152,15 @@ class UpscaleTab(tk.Frame):
         tk.Frame(left, bg=BORDER, height=1).pack(fill="x", padx=8, pady=(2, 4))
 
         # ── Real-ESRGAN ncnn (video upscaler) ────────────────────────────────
-        ncnn_hdr = tk.Frame(left, bg=BG_PANEL)
+        ncnn_hdr = tk.Frame(left, bg=THEME["bg_panel"])
         ncnn_hdr.pack(fill="x", padx=8, pady=(2, 0))
-        tk.Label(ncnn_hdr, text="Real-ESRGAN (Video)", bg=BG_PANEL, fg=FG_DIM,
+        tk.Label(ncnn_hdr, text="Real-ESRGAN (Video)", bg=THEME["bg_panel"], fg=THEME["fg_dim"],
                  font=("Segoe UI", 8, "bold")).pack(side="left")
-        self._ncnn_status_lbl = tk.Label(ncnn_hdr, bg=BG_PANEL,
+        self._ncnn_status_lbl = tk.Label(ncnn_hdr, bg=THEME["bg_panel"],
                                           font=("Segoe UI", 8, "bold"))
         self._ncnn_status_lbl.pack(side="left", padx=4)
 
-        ncnn_btns = tk.Frame(left, bg=BG_PANEL)
+        ncnn_btns = tk.Frame(left, bg=THEME["bg_panel"])
         ncnn_btns.pack(fill="x", padx=8, pady=1)
         self._ncnn_install_btn = tk.Button(
             ncnn_btns, text="Install to project",
@@ -168,9 +169,9 @@ class UpscaleTab(tk.Frame):
             command=self._install_ncnn)
         self._ncnn_install_btn.pack(side="left")
 
-        ncnn_model_row = tk.Frame(left, bg=BG_PANEL)
+        ncnn_model_row = tk.Frame(left, bg=THEME["bg_panel"])
         ncnn_model_row.pack(fill="x", padx=8, pady=(2, 1))
-        tk.Label(ncnn_model_row, text="Model:", bg=BG_PANEL, fg=FG_DIM,
+        tk.Label(ncnn_model_row, text="Model:", bg=THEME["bg_panel"], fg=THEME["fg_dim"],
                  font=("Segoe UI", 8)).pack(side="left")
         self._ncnn_model_var = tk.StringVar(value="realesrgan-x4plus-anime")
         ttk.Combobox(ncnn_model_row, textvariable=self._ncnn_model_var,
@@ -180,15 +181,15 @@ class UpscaleTab(tk.Frame):
         self._update_ncnn_status()
 
         # Frame step: how often to apply FLUX/ncnn (every N frames; gaps use LANCZOS)
-        step_row = tk.Frame(left, bg=BG_PANEL)
+        step_row = tk.Frame(left, bg=THEME["bg_panel"])
         step_row.pack(fill="x", padx=8, pady=(2, 1))
-        tk.Label(step_row, text="FLUX every N frames:", bg=BG_PANEL, fg=FG_DIM,
+        tk.Label(step_row, text="FLUX every N frames:", bg=THEME["bg_panel"], fg=THEME["fg_dim"],
                  font=("Segoe UI", 8)).pack(side="left")
         self._cine_step_var = tk.StringVar(value="4")
         ttk.Combobox(step_row, textvariable=self._cine_step_var,
                      values=["1", "2", "4", "8", "16"],
                      state="readonly", width=4).pack(side="left", padx=(4, 0))
-        tk.Label(step_row, text="(1=all, 16=fast)", bg=BG_PANEL, fg=FG_MUTED,
+        tk.Label(step_row, text="(1=all, 16=fast)", bg=THEME["bg_panel"], fg=FG_MUTED,
                  font=("Segoe UI", 7)).pack(side="left", padx=4)
 
         tk.Frame(left, bg=BORDER, height=1).pack(fill="x", padx=8, pady=(4, 4))
@@ -196,12 +197,12 @@ class UpscaleTab(tk.Frame):
         # ── NIM text-to-image (future) ────────────────────────────────────────
         tk.Label(left,
                  text="NIM text-to-image: coming soon",
-                 bg=BG_PANEL, fg=FG_DIM,
+                 bg=THEME["bg_panel"], fg=THEME["fg_dim"],
                  font=("Segoe UI", 8, "italic")).pack(anchor="w", padx=10, pady=(2, 1))
         tk.Label(left,
                  text="Prompt-driven regeneration will replace ESRGAN\n"
                       "once NVIDIA exposes img2img endpoints.",
-                 bg=BG_PANEL, fg=FG_MUTED,
+                 bg=THEME["bg_panel"], fg=FG_MUTED,
                  font=("Segoe UI", 7), justify="left").pack(anchor="w", padx=10, pady=(0, 4))
 
         # Hidden Text widgets — kept so _get_prompt()/_get_neg() work when NIM re-enables
@@ -209,56 +210,56 @@ class UpscaleTab(tk.Frame):
         self._prompt_txt.insert("1.0", self.DEFAULT_PROMPT)
         self._neg_txt = tk.Text(left, height=2, font=("Segoe UI", 8))
         self._neg_txt.insert("1.0", self.DEFAULT_NEG)
-        self._key_lbl = tk.Label(left, text="", bg=BG_PANEL)
+        self._key_lbl = tk.Label(left, text="", bg=THEME["bg_panel"])
 
         tk.Frame(left, bg=BORDER, height=1).pack(fill="x", padx=8, pady=(2, 8))
-        tk.Label(left, text="Output", bg=BG_PANEL, fg=FG_DIM,
+        tk.Label(left, text="Output", bg=THEME["bg_panel"], fg=THEME["fg_dim"],
                  font=("Segoe UI", 9, "bold")).pack(anchor="w", padx=10)
-        self._out_lbl = tk.Label(left, text="", bg=BG_PANEL, fg=FG_DIM,
+        self._out_lbl = tk.Label(left, text="", bg=THEME["bg_panel"], fg=THEME["fg_dim"],
                                  font=("Segoe UI", 8), wraplength=230, justify="left")
         self._out_lbl.pack(anchor="w", padx=10, pady=2)
-        tk.Button(left, text="Open Folder", bg=BG_CARD, fg=FG_TEXT,
+        tk.Button(left, text="Open Folder", bg=BG_CARD, fg=THEME["fg_text"],
                   relief="flat", font=("Segoe UI", 8), padx=6,
                   command=self._open_output).pack(anchor="w", padx=10, pady=2)
 
         # ── Right: progress + results + compare ──────────────────────────────
-        right = tk.Frame(pane, bg=BG_DARK)
+        right = tk.Frame(pane, bg=THEME["bg_dark"])
         pane.add(right, minsize=500)
 
         # Progress strip
-        prog_strip = tk.Frame(right, bg=BG_DARK, pady=3)
+        prog_strip = tk.Frame(right, bg=THEME["bg_dark"], pady=3)
         prog_strip.pack(fill="x", padx=10, side="top")
-        self._prog_lbl = tk.Label(prog_strip, text="Idle", bg=BG_DARK, fg=FG_DIM,
-                                   font=("Segoe UI", 9))
+        self._prog_lbl = tk.Label(prog_strip, text="Idle", bg=THEME["bg_dark"], fg=THEME["fg_dim"],
+                                   font=FONTS["small"])
         self._prog_lbl.pack(anchor="w")
         self._prog = ttk.Progressbar(prog_strip, orient="horizontal", mode="determinate")
         self._prog.pack(fill="x", pady=2)
 
         # System log (3 lines — errors, weights download status)
-        self._log = tk.Text(right, bg=BG_DARK, fg=FG_DIM, font=("Consolas", 8),
+        self._log = tk.Text(right, bg=THEME["bg_dark"], fg=THEME["fg_dim"], font=("Consolas", 8),
                             height=3, wrap="none", state="disabled",
                             relief="flat", borderwidth=0, pady=1)
         self._log.pack(fill="x", padx=10, side="top")
 
         # Vertical pane: results list (top) | compare+redo (bottom)
-        v_pane = tk.PanedWindow(right, orient="vertical", bg=BG_DARK, sashwidth=5)
+        v_pane = tk.PanedWindow(right, orient="vertical", bg=THEME["bg_dark"], sashwidth=5)
         v_pane.pack(fill="both", expand=True)
 
         # ── Results list ──────────────────────────────────────────────────────
-        res_outer = tk.Frame(v_pane, bg=BG_PANEL)
+        res_outer = tk.Frame(v_pane, bg=THEME["bg_panel"])
         v_pane.add(res_outer, minsize=120)
 
-        res_hdr = tk.Frame(res_outer, bg=BG_MID, pady=3)
+        res_hdr = tk.Frame(res_outer, bg=THEME["bg_mid"], pady=3)
         res_hdr.pack(fill="x")
-        tk.Label(res_hdr, text="Results", bg=BG_MID, fg=ACCENT,
+        tk.Label(res_hdr, text="Results", bg=THEME["bg_mid"], fg=THEME["accent"],
                  font=("Segoe UI", 9, "bold")).pack(side="left", padx=8)
-        self._res_count_lbl = tk.Label(res_hdr, text="0 items", bg=BG_MID, fg=FG_DIM,
+        self._res_count_lbl = tk.Label(res_hdr, text="0 items", bg=THEME["bg_mid"], fg=THEME["fg_dim"],
                                        font=("Segoe UI", 8))
         self._res_count_lbl.pack(side="left", padx=4)
         tk.Button(res_hdr, text="Redo Flagged", bg=ACCENT, fg="#000",
                   relief="flat", font=("Segoe UI", 8, "bold"), padx=6,
                   command=self._redo_flagged).pack(side="right", padx=4)
-        tk.Button(res_hdr, text="Clear", bg=BG_CARD, fg=FG_DIM,
+        tk.Button(res_hdr, text="Clear", bg=BG_CARD, fg=THEME["fg_dim"],
                   relief="flat", font=("Segoe UI", 8), padx=6,
                   command=self._clear_results).pack(side="right", padx=4)
 
@@ -272,20 +273,20 @@ class UpscaleTab(tk.Frame):
             ("Status", "center", False, (2, 4)),
             ("Actions", "center", False, (2, 8)),
         ]:
-            tk.Label(hdr, text=txt, bg=BG_CARD, fg=FG_DIM,
+            tk.Label(hdr, text=txt, bg=BG_CARD, fg=THEME["fg_dim"],
                      font=("Segoe UI", 8, "bold"), anchor=anchor).pack(
                 side="left", padx=px, fill="x" if expand else None, expand=expand)
 
         # Scrollable canvas for result cards
-        res_body = tk.Frame(res_outer, bg=BG_PANEL)
+        res_body = tk.Frame(res_outer, bg=THEME["bg_panel"])
         res_body.pack(fill="both", expand=True)
-        self._res_canvas = tk.Canvas(res_body, bg=BG_PANEL, highlightthickness=0)
+        self._res_canvas = tk.Canvas(res_body, bg=THEME["bg_panel"], highlightthickness=0)
         res_sb = ttk.Scrollbar(res_body, orient="vertical", command=self._res_canvas.yview)
         res_sb.pack(side="right", fill="y")
         self._res_canvas.pack(side="left", fill="both", expand=True)
         self._res_canvas.configure(yscrollcommand=res_sb.set)
 
-        self._results_inner = tk.Frame(self._res_canvas, bg=BG_PANEL)
+        self._results_inner = tk.Frame(self._res_canvas, bg=THEME["bg_panel"])
         self._res_win = self._res_canvas.create_window((0, 0), window=self._results_inner,
                                                         anchor="nw")
 
@@ -302,54 +303,54 @@ class UpscaleTab(tk.Frame):
                                   int(-1 * (e.delta / 120)), "units"))
 
         # ── Compare & Redo panel ──────────────────────────────────────────────
-        cmp_outer = tk.Frame(v_pane, bg=BG_DARK)
+        cmp_outer = tk.Frame(v_pane, bg=THEME["bg_dark"])
         v_pane.add(cmp_outer, minsize=200)
 
-        cmp_hdr = tk.Frame(cmp_outer, bg=BG_MID, pady=3)
+        cmp_hdr = tk.Frame(cmp_outer, bg=THEME["bg_mid"], pady=3)
         cmp_hdr.pack(fill="x")
-        tk.Label(cmp_hdr, text="Compare & Redo", bg=BG_MID, fg=ACCENT,
+        tk.Label(cmp_hdr, text="Compare & Redo", bg=THEME["bg_mid"], fg=THEME["accent"],
                  font=("Segoe UI", 9, "bold")).pack(side="left", padx=8)
         self._cmp_name_lbl = tk.Label(cmp_hdr, text="Select a result above",
-                                      bg=BG_MID, fg=FG_DIM, font=("Segoe UI", 9))
+                                      bg=THEME["bg_mid"], fg=THEME["fg_dim"], font=FONTS["small"])
         self._cmp_name_lbl.pack(side="left", padx=8)
 
-        cmp_body = tk.Frame(cmp_outer, bg=BG_DARK)
+        cmp_body = tk.Frame(cmp_outer, bg=THEME["bg_dark"])
         cmp_body.pack(fill="both", expand=True)
 
-        before_col = tk.Frame(cmp_body, bg=BG_DARK)
+        before_col = tk.Frame(cmp_body, bg=THEME["bg_dark"])
         before_col.pack(side="left", fill="both", expand=True, padx=(6, 3), pady=4)
-        tk.Label(before_col, text="Before (original)", bg=BG_DARK, fg=FG_DIM,
+        tk.Label(before_col, text="Before (original)", bg=THEME["bg_dark"], fg=THEME["fg_dim"],
                  font=("Segoe UI", 8)).pack(anchor="w")
-        self._cmp_before = tk.Canvas(before_col, bg=BG_PANEL, highlightthickness=1,
+        self._cmp_before = tk.Canvas(before_col, bg=THEME["bg_panel"], highlightthickness=1,
                                       highlightbackground=BORDER)
         self._cmp_before.pack(fill="both", expand=True)
 
-        after_col = tk.Frame(cmp_body, bg=BG_DARK)
+        after_col = tk.Frame(cmp_body, bg=THEME["bg_dark"])
         after_col.pack(side="left", fill="both", expand=True, padx=(3, 6), pady=4)
-        tk.Label(after_col, text="After (upscaled)", bg=BG_DARK, fg=FG_DIM,
+        tk.Label(after_col, text="After (upscaled)", bg=THEME["bg_dark"], fg=THEME["fg_dim"],
                  font=("Segoe UI", 8)).pack(anchor="w")
-        self._cmp_after = tk.Canvas(after_col, bg=BG_PANEL, highlightthickness=1,
+        self._cmp_after = tk.Canvas(after_col, bg=THEME["bg_panel"], highlightthickness=1,
                                      highlightbackground=BORDER)
         self._cmp_after.pack(fill="both", expand=True)
 
         # Redo params bar
-        params_bar = tk.Frame(cmp_outer, bg=BG_MID, pady=4)
+        params_bar = tk.Frame(cmp_outer, bg=THEME["bg_mid"], pady=4)
         params_bar.pack(fill="x", side="bottom")
 
-        tk.Label(params_bar, text="Strength:", bg=BG_MID, fg=FG_DIM,
+        tk.Label(params_bar, text="Strength:", bg=THEME["bg_mid"], fg=THEME["fg_dim"],
                  font=("Segoe UI", 8)).pack(side="left", padx=(8, 2))
         self._redo_strength_var = tk.StringVar(value="0.65")
         ttk.Combobox(params_bar, textvariable=self._redo_strength_var,
                      values=["0.45", "0.55", "0.65", "0.75", "0.85"],
                      state="readonly", width=6).pack(side="left")
 
-        tk.Label(params_bar, text="Scale:", bg=BG_MID, fg=FG_DIM,
+        tk.Label(params_bar, text="Scale:", bg=THEME["bg_mid"], fg=THEME["fg_dim"],
                  font=("Segoe UI", 8)).pack(side="left", padx=(8, 2))
         self._redo_scale_var = tk.StringVar(value="4")
         ttk.Combobox(params_bar, textvariable=self._redo_scale_var,
                      values=["2", "4"], state="readonly", width=3).pack(side="left")
 
-        tk.Button(params_bar, text="Open File", bg=BG_CARD, fg=FG_TEXT,
+        tk.Button(params_bar, text="Open File", bg=BG_CARD, fg=THEME["fg_text"],
                   relief="flat", font=("Segoe UI", 8), padx=6,
                   command=self._open_selected).pack(side="right", padx=4)
         self._flag_btn = tk.Button(params_bar, text="Flag", bg="#f59e0b", fg="#000",
@@ -412,11 +413,11 @@ class UpscaleTab(tk.Frame):
             self._result_phs.append(ph_b)
             tk.Label(row, image=ph_b, bg=row_bg, bd=0).pack(side="left", padx=(4, 0))
         else:
-            tk.Label(row, text="  —  ", bg=row_bg, fg=FG_DIM,
+            tk.Label(row, text="  —  ", bg=row_bg, fg=THEME["fg_dim"],
                      font=("Segoe UI", 8), width=7).pack(side="left")
 
-        tk.Label(row, text="→", bg=row_bg, fg=FG_DIM,
-                 font=("Segoe UI", 9)).pack(side="left", padx=2)
+        tk.Label(row, text="→", bg=row_bg, fg=THEME["fg_dim"],
+                 font=FONTS["small"]).pack(side="left", padx=2)
 
         # After thumbnail
         if r.get("after_pil"):
@@ -424,11 +425,11 @@ class UpscaleTab(tk.Frame):
             self._result_phs.append(ph_a)
             tk.Label(row, image=ph_a, bg=row_bg, bd=0).pack(side="left", padx=(0, 6))
         else:
-            tk.Label(row, text="  —  ", bg=row_bg, fg=FG_DIM,
+            tk.Label(row, text="  —  ", bg=row_bg, fg=THEME["fg_dim"],
                      font=("Segoe UI", 8), width=7).pack(side="left")
 
         # Name + category
-        tk.Label(row, text=f"[{r['cat']}]  {r['name']}", bg=row_bg, fg=FG_TEXT,
+        tk.Label(row, text=f"[{r['cat']}]  {r['name']}", bg=row_bg, fg=THEME["fg_text"],
                  font=("Consolas", 8), anchor="w").pack(side="left", padx=4,
                                                          fill="x", expand=True)
 
@@ -436,7 +437,7 @@ class UpscaleTab(tk.Frame):
         src_w, src_h = r.get("src_size", (0, 0))
         out_w, out_h = r.get("out_size", (0, 0))
         dims = f"{src_w}×{src_h}→{out_w}×{out_h}" if out_w else f"{src_w}×{src_h}"
-        tk.Label(row, text=dims, bg=row_bg, fg=FG_DIM,
+        tk.Label(row, text=dims, bg=row_bg, fg=THEME["fg_dim"],
                  font=("Segoe UI", 8), width=16).pack(side="left", padx=2)
 
         # Status badge
@@ -449,7 +450,7 @@ class UpscaleTab(tk.Frame):
         tk.Button(row, text="Flag", bg=row_bg, fg="#f59e0b", relief="flat",
                   font=("Segoe UI", 8), padx=3,
                   command=lambda i=idx: self._flag_result(i)).pack(side="right", padx=2)
-        tk.Button(row, text="Redo", bg=row_bg, fg=ACCENT2, relief="flat",
+        tk.Button(row, text="Redo", bg=row_bg, fg=THEME["accent_light"], relief="flat",
                   font=("Segoe UI", 8), padx=3,
                   command=lambda i=idx: self._redo_result(i)).pack(side="right", padx=2)
 
@@ -511,7 +512,7 @@ class UpscaleTab(tk.Frame):
         canvas.delete("all")
         if img is None:
             canvas.create_text(max(canvas.winfo_width() // 2, 60), 40,
-                               text="No image", fill=FG_DIM, font=("Segoe UI", 9))
+                               text="No image", fill=FG_DIM, font=FONTS["small"])
             return
         cw = canvas.winfo_width()  or 300
         ch = canvas.winfo_height() or 200
@@ -583,7 +584,7 @@ class UpscaleTab(tk.Frame):
                     raw = dat.read_bytes()
                     if len(raw) >= 20 and raw[:4] == b"CGSR":
                         return (cat,
-                                lambda p=dat: _decode_dat_frame(p, 0),
+                                lambda p=dat: decode_dat_frame(p, 0),
                                 out_root / cat / f"{dat.stem}_f0.png")
                 except Exception:
                     pass
@@ -923,7 +924,7 @@ class UpscaleTab(tk.Frame):
                     count = raw[4]
                     for fi in range(max(1, count)):
                         jobs.append(("ui_panels",
-                                     lambda p=dat, f=fi: _decode_dat_frame(p, f),
+                                     lambda p=dat, f=fi: decode_dat_frame(p, f),
                                      out_dir / f"{dat.stem}_f{fi}.png"))
                 except Exception:
                     pass
@@ -1151,11 +1152,11 @@ class UpscaleTab(tk.Frame):
         ff = self._ffmpeg_path_var.get().strip() if hasattr(self, "_ffmpeg_path_var") else self._ffmpeg_path
         found = self._probe_ffmpeg(ff)
         if found:
-            self._ffmpeg_status_lbl.config(text="✓ found", fg=ACCENT3)
+            self._ffmpeg_status_lbl.config(text="✓ found", fg=THEME["success"])
             if hasattr(self, "_install_btn"):
-                self._install_btn.config(state="disabled", bg=BG_CARD, fg=FG_DIM)
+                self._install_btn.config(state="disabled", bg=BG_CARD, fg=THEME["fg_dim"])
         else:
-            self._ffmpeg_status_lbl.config(text="✗ not found", fg=RED)
+            self._ffmpeg_status_lbl.config(text="✗ not found", fg=THEME["danger"])
             if hasattr(self, "_install_btn"):
                 self._install_btn.config(state="normal", bg=ACCENT2, fg="#000")
 
@@ -1256,10 +1257,10 @@ class UpscaleTab(tk.Frame):
     def _update_ncnn_status(self):
         exe = self._detect_ncnn()
         if exe:
-            self._ncnn_status_lbl.config(text="✓ found", fg=ACCENT3)
-            self._ncnn_install_btn.config(state="disabled", bg=BG_CARD, fg=FG_DIM)
+            self._ncnn_status_lbl.config(text="✓ found", fg=THEME["success"])
+            self._ncnn_install_btn.config(state="disabled", bg=BG_CARD, fg=THEME["fg_dim"])
         else:
-            self._ncnn_status_lbl.config(text="✗ not found", fg=RED)
+            self._ncnn_status_lbl.config(text="✗ not found", fg=THEME["danger"])
             self._ncnn_install_btn.config(state="normal", bg=ACCENT2, fg="#000")
 
     def _install_ncnn(self):
@@ -1537,7 +1538,7 @@ class UpscaleTab(tk.Frame):
     def _tn_to_image(tn_path: Path):
         from PIL import Image as PILImage
         raw = tn_path.read_bytes()
-        rgba = _decode_tn_pixels(raw)
+        rgba = decode_tn_pixels(raw)
         if rgba is None:
             return None
         return PILImage.frombytes("RGBA", (16, 16), rgba)

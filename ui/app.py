@@ -1,3 +1,4 @@
+from ui.tabs.library import LibraryTab
 from ui.tabs.world_map import WorldMapTab
 from ui.tabs.character_gallery import CharacterGalleryTab
 from ui.tabs.equipment import EquipmentTab
@@ -21,6 +22,9 @@ from core.constants import *
 from ui.widgets import *
 import os, logging
 from core.config import Config
+from ui.theme import THEME, FONTS, apply_global_styles, enable_high_dpi
+from ui.wizard import WelcomeWizard
+
 class SettingsDialog(tk.Toplevel):
     def __init__(self, parent, config):
         self.config = config
@@ -82,59 +86,54 @@ class AssetStudio(tk.Tk):
         self.config = config
         super().__init__()
         self.config.load()
-        self.title("RevEngine  —  Revenant (1999) Asset Encyclopedia")
-        self.geometry("1400x880")
-        self.configure(bg=BG_DARK)
+        self.title("RevEngine  —  Revenant Asset Encyclopedia")
+
+        # Professional Geometry
+        enable_high_dpi(self)
+        self.geometry("1440x900")
+        self.configure(bg=THEME["bg_dark"])
         self.resizable(True, True)
-        self._apply_style()
+
+        # Styles
+        apply_global_styles(self)
+
+        if not self.config.config_path.exists() or not self.config.extract_dir.exists():
+            self.withdraw() # Hide main window
+            WelcomeWizard(self, self.config, on_complete=self._on_wizard_complete)
+        else:
+            self._init_app()
+
+    def _on_wizard_complete(self):
+        self.deiconify()
+        self._init_app()
+
+    def _init_app(self):
         self._build_ui()
         self._bind_shortcuts()
-
-    def _apply_style(self):
-        style = ttk.Style(self)
-        style.theme_use("clam")
-
-        style.configure("TNotebook",          background=BG_DARK,  borderwidth=0)
-        style.configure("TNotebook.Tab",      background=BG_MID,   foreground=FG_DIM,
-                         padding=[14, 6],     font=("Segoe UI", 10, "bold"))
-        style.map("TNotebook.Tab",
-                  background=[("selected", BG_PANEL)],
-                  foreground=[("selected", FG_TEXT)])
-
-        style.configure("Treeview",           background=BG_PANEL, foreground=FG_TEXT,
-                         fieldbackground=BG_PANEL, rowheight=22,
-                         font=("Segoe UI", 9))
-        style.configure("Treeview.Heading",   background=BG_MID,   foreground=ACCENT2,
-                         font=("Segoe UI", 9, "bold"), relief="flat")
-        style.map("Treeview",
-                  background=[("selected", BG_CARD)],
-                  foreground=[("selected", FG_TEXT)])
-
-        style.configure("TScrollbar",         background=BG_MID,   troughcolor=BG_DARK,
-                         arrowcolor=FG_DIM,   borderwidth=0, relief="flat")
-        style.configure("TCombobox",          background=BG_PANEL, foreground=FG_TEXT,
-                         fieldbackground=BG_PANEL, arrowcolor=ACCENT2)
-        style.configure("TSeparator",         background=BORDER)
-        style.configure("TPanedwindow",       background=BG_DARK)
+        # Update header counts after brief delay
+        self.after(2000, self._update_counts)
 
     def _build_ui(self):
         # ── Menu bar ─────────────────────────────────────────────────────────
         self._build_menu()
 
         # ── Header ───────────────────────────────────────────────────────────
-        hdr = tk.Frame(self, bg=BG_DARK, pady=8)
+        hdr = tk.Frame(self, bg=THEME["bg_dark"], pady=12)
         hdr.pack(fill="x")
 
-        tk.Label(hdr, text="REVENGINE", bg=BG_DARK, fg=ACCENT,
-                 font=("Segoe UI", 18, "bold")).pack(side="left", padx=16)
-        tk.Label(hdr, text="Revenant (1999) Asset Encyclopedia",
-                 bg=BG_DARK, fg=FG_DIM,
-                 font=("Segoe UI", 11)).pack(side="left", padx=0)
+        # Logo/Brand
+        tk.Label(hdr, text="REVENGINE", bg=THEME["bg_dark"], fg=THEME["accent_light"],
+                 font=FONTS["title"]).pack(side="left", padx=(24, 12))
+
+        tk.Label(hdr, text="Encyclopedia",
+                 bg=THEME["bg_dark"], fg=THEME["fg_dim"],
+                 font=FONTS["header"]).pack(side="left", pady=(4, 0))
 
         # Asset counts (filled after load)
-        self._hdr_counts = tk.Label(hdr, text="", bg=BG_DARK, fg=ACCENT3,
-                                     font=("Segoe UI", 9))
-        self._hdr_counts.pack(side="right", padx=16)
+        self._hdr_counts = tk.Label(hdr, text="Analyzing Library...",
+                                     bg=THEME["bg_dark"], fg=THEME["success"],
+                                     font=FONTS["small"])
+        self._hdr_counts.pack(side="right", padx=24)
 
         # ── Status bar ───────────────────────────────────────────────────────
         self._status = StatusBar(self)
@@ -146,6 +145,7 @@ class AssetStudio(tk.Tk):
         self._nb = ttk.Notebook(self)
         self._nb.pack(fill="both", expand=True, padx=0, pady=0)
 
+        self._lib_tab = LibraryTab(self._nb, self.config, self._status)
         self._map_tab = WorldMapTab(self._nb, self.config, self._status)
         self._char_tab  = CharacterGalleryTab(self._nb, self.config, self._status)
         self._equip_tab = EquipmentTab(self._nb, self.config, self._status)
@@ -162,6 +162,7 @@ class AssetStudio(tk.Tk):
         from asset_studio_modernize import ModernizeTab
         self._modernize_tab  = ModernizeTab(self._nb, self.config, self._status)
 
+        self._nb.add(self._lib_tab,      text="  Library  ")
         self._nb.add(self._map_tab,      text="  World Map  ")
         self._nb.add(self._char_tab,     text="  Characters  ")
         self._nb.add(self._equip_tab,    text="  Equipment  ")
@@ -177,8 +178,6 @@ class AssetStudio(tk.Tk):
         self._nb.add(self._godot_tab,     text="  Godot Export  ")
         self._nb.add(self._modernize_tab, text="  Modernize 3D  ")
 
-        # Update header counts after brief delay
-        self.after(2000, self._update_counts)
 
     def _update_counts(self):
         try:
